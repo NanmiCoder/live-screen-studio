@@ -1,8 +1,10 @@
 import AppKit
+import CursorKit
 import ZoomCore
 
 /// Scripted run on one display with a virtual cursor, so zoom can be verified without touching the real mouse.
-///   LiveZoom --demo <displayID> <outputDir>
+///   LiveZoom --demo <displayID> <outputDir>       zoom, follow, a stroke, the wheel
+///   LiveZoom --demo-ink <displayID> <outputDir>   every stroke style, then every highlight on real text
 /// Logs the camera every frame and takes screenshots at fixed moments.
 final class Demo {
     private struct Move {
@@ -34,7 +36,7 @@ final class Demo {
     private var size: CGSize { screen.frame.size }
     private var elapsed: Double { CACurrentMediaTime() - startTime }
 
-    func run() {
+    func run(ink: Bool = false) {
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
         zoom.cursorLocation = { [unowned self] in self.global(self.currentCursor()) }
         presenter.managesSystemCursor = false
@@ -46,6 +48,7 @@ final class Demo {
                                      self.elapsed, "\(camera.phase)", camera.zoom, vp.minX, vp.minY, vp.width, vp.height,
                                      c.x, c.y, sequence))
         }
+        if ink { return runInk() }
 
         // 1. Overlay at exactly 1× must look identical to the real screen.
         at(0.0) { self.shot("0-before") }
@@ -84,6 +87,64 @@ final class Demo {
             self.mark("end")
         }
         at(11.6) {
+            try? self.lines.joined(separator: "\n").write(to: self.outputDir.appendingPathComponent("camera.log"),
+                                                          atomically: true, encoding: .utf8)
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Zooms in on text, draws one stroke in each style, then marks lines of text with each highlight.
+    private func runInk() {
+        at(0.0) { self.shot("ink-0-before") }
+        at(0.3) {
+            self.zoom.zoomLevel = 2
+            self.cursor = CGPoint(x: self.size.width * 0.3, y: self.size.height * 0.32)
+            self.zoom.toggle()
+        }
+        at(1.5) {
+            self.mark("styles")
+            for (i, style) in InkStyle.allCases.enumerated() {
+                self.presenter.inkStyle = style
+                let y = self.cursor.y - 120 + CGFloat(i) * 50
+                let points = (0...30).map { k -> CGPoint in
+                    let t = CGFloat(k) / 30
+                    return CGPoint(x: self.cursor.x - 160 + t * 320, y: y + sin(t * .pi * 2) * 12)
+                }
+                self.presenter.beginStroke(at: self.cg(points[0]))
+                points.dropFirst().forEach { self.presenter.moveStroke(to: self.cg($0), straight: false) }
+                self.presenter.endStroke()
+            }
+        }
+        at(2.4) { self.shot("ink-1-styles") }
+        at(2.8) {
+            self.presenter.clearStrokes(animated: false)
+            self.presenter.inkStyle = .neon
+        }
+        // One highlight per line, at rows of the stage's text (on the 1728 × 1117 built-in display); the camera
+        // holds still for these small moves. The underline is pointed at from just below its line.
+        let targets: [(HighlightKind, CGFloat)] = [(.box, 209), (.underline, 328), (.fill, 461)]
+        for (i, (kind, y)) in targets.enumerated() {
+            at(3.0 + Double(i) * 0.9) {
+                self.cursor = CGPoint(x: self.size.width * 0.3, y: y)
+                self.mark("highlight \(kind)")
+                self.zoom.lineOfText { line in
+                    self.lines.append("line for \(kind): \(line.map { "\($0)" } ?? "none")")
+                    if let line { self.presenter.addHighlight(kind, around: line) }
+                }
+            }
+        }
+        at(6.0) { self.shot("ink-2-highlights") }
+        at(6.3) {
+            self.cursor = CGPoint(x: self.size.width * 0.3, y: 503)
+            self.zoom.lineOfText { line in
+                self.lines.append("line for spotlight: \(line.map { "\($0)" } ?? "none")")
+                if let line { self.presenter.addHighlight(.spotlight, around: line) }
+            }
+        }
+        at(7.2) { self.shot("ink-3-spotlight") }
+        at(7.5) { self.zoom.toggle() }
+        at(8.6) { self.shot("ink-4-after") }
+        at(9.2) {
             try? self.lines.joined(separator: "\n").write(to: self.outputDir.appendingPathComponent("camera.log"),
                                                           atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
