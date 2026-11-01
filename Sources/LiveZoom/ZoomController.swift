@@ -30,13 +30,22 @@ final class ZoomController: NSObject {
     private(set) var isDrawingAvailable = false {
         didSet { if oldValue != isDrawingAvailable { onDrawingAvailable?(isDrawingAvailable) } }
     }
+    /// Called with where the cursor may go while zoomed in (global CG coordinates, edges included), or nil.
+    var onCursorBounds: ((CGRect?) -> Void)?
+    /// Zooming out is always a deliberate click: while zoomed in, the cursor is held on the zoomed display and
+    /// away from the Dock's edge, instead of zooming out when it gets there.
+    private(set) var cursorBounds: CGRect? {
+        didSet { if oldValue != cursorBounds { onCursorBounds?(cursorBounds) } }
+    }
     /// While a stroke is being drawn the camera holds still, so the content under the pen does not slide away.
+    /// The draw tap owns its release; session button state can miss a swallowed press.
     var isDrawing = false {
         didSet { camera?.followPaused = isDrawing }
     }
 
     // Test hooks: the demo drives a virtual cursor.
     var cursorLocation: () -> NSPoint = { NSEvent.mouseLocation }
+    private var currentCursorLocation: NSPoint { presenter.drawingCursorLocation ?? cursorLocation() }
     /// Diagnostics: the camera and the capture frame number shown, once per display frame.
     var onFrame: ((ZoomCamera, Int) -> Void)?
 
@@ -53,6 +62,7 @@ final class ZoomController: NSObject {
     private var requestSequence = 0
     private var pendingFactor: CGFloat = 1
     private var zoomAgainWhenFinished = false
+    private var offScreenSince: CFTimeInterval?
     /// Keeps the displayed IOSurfaces from being reused by ScreenCaptureKit while on screen.
     private var heldFrames: [ScreenCapturer.Frame] = []
     private var idleStopWork: DispatchWorkItem?
@@ -79,9 +89,9 @@ final class ZoomController: NSObject {
         case .active:
             guard let camera, let screen else { return }
             let now = CACurrentMediaTime()
-            let mouse = cursorLocation()
+            let mouse = currentCursorLocation
             let local = Self.local(mouse, in: screen)
-            if !NSMouseInRect(mouse, screen.frame, false) {
+            if cursorBounds == nil, !NSMouseInRect(mouse, screen.frame, false) {
                 // The cursor is on another display while this one zooms out: zoom there once this one is done.
                 zoomAgainWhenFinished = true
             } else if camera.phase == .zoomingOut {
@@ -109,12 +119,25 @@ final class ZoomController: NSObject {
         }
     }
 
+    /// Looks up the line of text under the cursor in the picture on screen, while zoomed in; calls back on the
+    /// main thread with it in display-local content points, or nil.
+    func lineOfText(_ completion: @escaping (CGRect?) -> Void) {
+        guard state == .active, let camera, camera.phase == .zoomingIn || camera.phase == .zoomed, let screen,
+              let frame = heldFrames.last else { return completion(nil) }
+        var cursor = Self.local(currentCursorLocation, in: screen)
+        cursor.x = min(max(cursor.x, 0), screen.frame.width)
+        cursor.y = min(max(cursor.y, 0), screen.frame.height)
+        TextFinder.line(in: frame, at: cursor, visible: camera.viewport, display: screen.frame.size,
+                        completion: completion)
+    }
+
     /// Drops everything immediately, e.g. when displays change or the app quits.
     func reset() {
         stopDisplayLink()
         for window in overlays.values { window.orderOut(nil) }
         overlays.removeAll()
         isDrawingAvailable = false
+        cursorBounds = nil
         isDrawing = false
         presenter.clearStrokes(animated: false)
         presenter.endZoom()
@@ -198,7 +221,7 @@ final class ZoomController: NSObject {
         config.follow = followPreset
         config.minZoom = minZoom
         let camera = ZoomCamera(display: screen.frame.size, config: config)
-        camera.zoomIn(to: zoomLevel * pendingFactor, cursor: Self.local(cursorLocation(), in: screen), now: now)
+        camera.zoomIn(to: zoomLevel * pendingFactor, cursor: Self.local(currentCursorLocation, in: screen), now: now)
         let overlay = overlay(for: screen, displayID: displayID)
         self.camera = camera
         self.overlay = overlay
@@ -217,17 +240,27 @@ final class ZoomController: NSObject {
 
     private func tickActive(now: CFTimeInterval, dt: Double) {
         guard let screen, let displayID = screen.displayID, let camera else { return reset() }
-        let mouse = cursorLocation()
-        let leaving = !NSMouseInRect(mouse, screen.frame, false)
-        // Over the Dock the system cursor cannot be hidden and sits at its real, unzoomed position, which no
-        // longer matches the zoomed picture: zoom out rather than show a cursor pointing at the wrong thing.
+        let mouse = currentCursorLocation
+        // The input tap keeps the cursor on this display while zoomed in, but it can overshoot an edge for a
+        // moment before being put back: treat that as the edge. Only if it stays elsewhere (no input tap, or
+        // another app moved it) is this display left behind.
+        if NSMouseInRect(mouse, screen.frame, false) {
+            offScreenSince = nil
+        } else if offScreenSince == nil {
+            offScreenSince = now
+        }
+        let gone = offScreenSince.map { now - $0 > 0.5 } ?? false
+        // When something else takes over the cursor (e.g. a pinned Dock, the screenshot crosshair), the system
+        // cursor shows at its real, unzoomed position, which no longer matches the zoomed picture.
         let systemCursorShowing = presenter.isSystemCursorRevealed
-        if leaving || systemCursorShowing, camera.phase == .zoomingIn || camera.phase == .zoomed {
+        if gone || systemCursorShowing, camera.phase == .zoomingIn || camera.phase == .zoomed {
+            log("zooming out: \(gone ? "the cursor left the display" : "the system cursor is showing")")
             camera.zoomOut(cursor: Self.local(mouse, in: screen), now: now)
         }
-        // The button-up that ends a stroke can be lost (e.g. a tap was briefly disabled); don't stay frozen.
-        if isDrawing, NSEvent.pressedMouseButtons & 1 == 0 { isDrawing = false }
-        camera.update(cursor: Self.local(mouse, in: screen), now: now, dt: dt)
+        var cursor = Self.local(mouse, in: screen)
+        cursor.x = min(max(cursor.x, 0), screen.frame.width)
+        cursor.y = min(max(cursor.y, 0), screen.frame.height)
+        camera.update(cursor: cursor, now: now, dt: dt)
         let zoomedIn = camera.phase == .zoomingIn || camera.phase == .zoomed
         if isDrawingAvailable, !zoomedIn {
             // Strokes shrink with the content as it zooms out, then fade.
@@ -235,6 +268,9 @@ final class ZoomController: NSObject {
             presenter.clearStrokes(animated: true)
         }
         isDrawingAvailable = zoomedIn
+        if zoomedIn != (cursorBounds != nil) {
+            cursorBounds = zoomedIn ? Self.cursorBounds(on: screen, displayID: displayID) : nil
+        }
         CATransaction.begin()
         render()
         presenter.zoomFrame(now: now, dt: dt, mapping: mapping(for: camera, displayID: displayID))
@@ -246,6 +282,7 @@ final class ZoomController: NSObject {
 
     private func finish() {
         isDrawingAvailable = false
+        cursorBounds = nil
         overlay?.orderOut(nil)
         // Let go of the last captured frame (about 57 MB on a 5K display).
         overlay?.clear()
@@ -273,7 +310,7 @@ final class ZoomController: NSObject {
 
     private func mapping(for camera: ZoomCamera, displayID: CGDirectDisplayID) -> CursorPresenter.ZoomMapping {
         CursorPresenter.ZoomMapping(displayID: displayID, map: { camera.screenPoint(for: $0) }, scale: camera.zoom,
-                                    origin: camera.viewport.origin)
+                                    origin: camera.viewport.origin, holdsCursor: cursorBounds != nil)
     }
 
     private func overlay(for screen: NSScreen, displayID: CGDirectDisplayID) -> OverlayWindow {
@@ -314,8 +351,26 @@ final class ZoomController: NSObject {
     // MARK: - Geometry
 
     private func screenUnderCursor() -> NSScreen? {
-        let mouse = cursorLocation()
+        let mouse = currentCursorLocation
         return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+    }
+
+    /// Where the cursor may go while zoomed in: the whole display except a strip along the Dock's edge (the
+    /// Dock itself when it is always shown), since over the Dock the system cursor cannot be hidden.
+    private static func cursorBounds(on screen: NSScreen, displayID: CGDirectDisplayID) -> CGRect {
+        let display = CGDisplayBounds(displayID)
+        var left = display.minX, right = display.maxX - 0.5
+        let top = display.minY
+        var bottom = display.maxY - 0.5
+        // An auto-hiding Dock appears when the cursor reaches the very edge; a few points keep it away.
+        let strip: CGFloat = 3
+        let frame = screen.frame, visible = screen.visibleFrame
+        switch UserDefaults(suiteName: "com.apple.dock")?.string(forKey: "orientation") {
+        case "left": left += max(visible.minX - frame.minX, strip)
+        case "right": right -= max(frame.maxX - visible.maxX, strip)
+        default: bottom -= max(visible.minY - frame.minY, strip)
+        }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
     }
 
     /// Global AppKit coordinates → display-local points with a top-left origin.

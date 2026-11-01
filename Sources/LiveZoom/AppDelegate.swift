@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CursorKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settings = AppSettings.shared
@@ -33,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .toggle: zoom.toggle()
             case .adjustZoom(let steps): zoom.adjustZoom(steps: steps)
             case .click(let location): presenter.click(at: location)
+            case .drawingPointer(let location): presenter.drawingPointer = location
             case .strokeBegan(let location):
                 presenter.beginStroke(at: location)
                 zoom.isDrawing = true
@@ -42,12 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 zoom.isDrawing = false
             case .undoStroke: presenter.undoStroke()
             case .clearStrokes: presenter.clearStrokes(animated: true)
+            case .highlight(let kind): highlight(kind)
             }
         }
         zoom.onDrawingAvailable = { [weak self] available in
             guard let self else { return }
             input.drawingArmed = available && settings.drawWhileZoomed
+            input.keysArmed = available
+            if available, !settings.shortcuts.isEmpty { TextFinder.warmUp() }
         }
+        zoom.onCursorBounds = { [weak self] bounds in self?.input.cursorBounds = bounds }
         presenter.onStrokesChanged = { [weak self] any in self?.input.hasStrokes = any }
         applySettings()
         settingsObserver = settings.objectWillChange.sink { [weak self] _ in
@@ -76,14 +82,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             diagnosis?.run()
             return
         }
-        if let index = args.firstIndex(of: "--demo"), args.count > index + 2, let id = UInt32(args[index + 1]) {
+        if let index = args.firstIndex(where: { $0 == "--demo" || $0 == "--demo-ink" }), args.count > index + 2,
+           let id = UInt32(args[index + 1]) {
             demo = Demo(zoom: zoom, presenter: presenter, displayID: id, outputDir: URL(fileURLWithPath: args[index + 2]))
             guard let demo else {
                 let ids = NSScreen.screens.compactMap { $0.displayID }.map(String.init).joined(separator: ", ")
                 log("demo: no display \(id); available: \(ids)")
                 exit(1)
             }
-            demo.run()
+            demo.run(ink: args[index] == "--demo-ink")
             presenter.start()
             return
         }
@@ -117,6 +124,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let armed = zoom.isDrawingAvailable && settings.drawWhileZoomed
         if input.drawingArmed != armed { input.drawingArmed = armed }
 
+        presenter.inkStyle = settings.inkStyle
+        presenter.strokeColor = settings.inkColor.color
+        presenter.strokeWidth = settings.strokeWidth
+        input.shortcuts = Dictionary(settings.shortcuts.map { ($0.value.combo, $0.key) }, uniquingKeysWith: { a, _ in a })
+
         presenter.style = settings.cursorStyle
         presenter.sizeScale = settings.cursorSize
         presenter.clickEffect = settings.clickEffect
@@ -125,6 +137,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.idleDelay = settings.hideIdleCursor ? settings.idleDelay : nil
         presenter.alwaysOn = settings.customCursorAlways
         presenter.isEnabled = settings.enabled
+    }
+
+    /// Marks the line of text under the cursor; the spotlight shortcut turns an existing spotlight off instead.
+    private func highlight(_ kind: HighlightKind) {
+        if kind == .spotlight, presenter.removeSpotlight() { return }
+        zoom.lineOfText { [weak self] line in
+            // Zooming out clears the marks once; one arriving after that would stay behind.
+            guard let self, let line, zoom.isDrawingAvailable else { return }
+            presenter.addHighlight(kind, around: line)
+        }
     }
 
     /// The event tap needs Accessibility permission; keep retrying until it is granted.

@@ -171,7 +171,28 @@ private struct ZoomPage: View {
                     shortcut("左键拖动", "画线（按住 ⇧ 画直线）")
                     shortcut("⌘ + 左键拖动", "正常拖拽、选文字")
                     shortcut("右键", "撤销一笔")
-                    shortcut("Esc", "清除全部笔迹")
+                }
+                shortcut("Esc", "清除全部笔迹和高亮")
+                LazyVGrid(columns: inkColumns, spacing: 10) {
+                    ForEach(InkStyle.allCases, id: \.self) { style in
+                        InkTile(style: style, color: settings.inkColor.color, selected: settings.inkStyle == style)
+                            .onTapGesture { settings.inkStyle = style }
+                    }
+                }
+                .padding(.vertical, 4)
+                LabeledContent("颜色") {
+                    HStack(spacing: 10) {
+                        ForEach(InkColor.allCases, id: \.self) { option in
+                            ColorDot(color: option.color, title: option.title, selected: settings.inkColor == option)
+                                .onTapGesture { settings.inkColor = option }
+                        }
+                    }
+                }
+                LabeledContent("粗细") {
+                    HStack {
+                        Slider(value: $settings.strokeWidth, in: 2...12, step: 1)
+                        Text("\(Int(settings.strokeWidth)) pt").monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
                 }
             } header: {
                 Text("画笔")
@@ -179,18 +200,176 @@ private struct ZoomPage: View {
                 Text("放大时单击、双击照常生效；笔迹跟着画面移动，缩回时自动清除。")
             }
 
+            Section {
+                ForEach(HighlightKind.allCases, id: \.self) { kind in
+                    LabeledContent(kind.title) { ShortcutRecorder(kind: kind, settings: settings) }
+                }
+            } header: {
+                Text("高亮快捷键")
+            } footer: {
+                Text("放大后把光标停在一行文字上按快捷键，自动识别这一行并加上框、划线、荧光笔或聚光灯；聚光灯再按一次关闭。只在放大时生效，建议带上 ⌥ 或 ⌃，以免占用打字的键。")
+            }
+
             Section("操作") {
                 shortcut("单击\(settings.trigger.title)", "放大 / 缩回")
                 shortcut("按住\(settings.trigger.title)并滚动滚轮", "调整倍数")
                 shortcut("⌥ + \(settings.trigger.title)", "原来的点击")
-                shortcut("放大时把鼠标移到另一块屏幕", "自动缩回")
+                shortcut("放大时", "光标留在这块屏幕里，单击\(settings.trigger.title)才缩回")
             }
         }
         .formStyle(.grouped)
     }
 
+    private let inkColumns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 5)
+
     private func shortcut(_ action: String, _ result: String) -> some View {
         LabeledContent(action) { Text(result).foregroundStyle(.secondary) }
+    }
+}
+
+private struct ColorDot: View {
+    let color: NSColor
+    let title: String
+    let selected: Bool
+
+    var body: some View {
+        Circle()
+            .fill(Color(nsColor: color))
+            .overlay(Circle().stroke(Color.primary.opacity(0.25), lineWidth: 1))
+            .frame(width: 20, height: 20)
+            .padding(3)
+            .overlay(Circle().stroke(Color.accentColor, lineWidth: 2).opacity(selected ? 1 : 0))
+            .help(title)
+    }
+}
+
+/// A wavy sample line in one stroke style, drawn like the real thing on a dark background.
+private struct InkTile: View {
+    let style: InkStyle
+    let color: NSColor
+    let selected: Bool
+
+    var body: some View {
+        VStack(spacing: 6) {
+            // Only the dashes move, so only that tile animates.
+            TimelineView(.animation(minimumInterval: nil, paused: style != .dashed)) { timeline in
+                Canvas { ctx, size in
+                    ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.12, green: 0.13, blue: 0.16)))
+                    draw(in: &ctx, size: size, time: timeline.date.timeIntervalSinceReferenceDate)
+                }
+            }
+            .frame(height: 54)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selected ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: selected ? 2.5 : 1)
+            )
+            Text(style.title).font(.caption).foregroundStyle(selected ? .primary : .secondary)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func draw(in ctx: inout GraphicsContext, size: CGSize, time: Double) {
+        let points = (0...40).map { i -> CGPoint in
+            let t = CGFloat(i) / 40
+            return CGPoint(x: 14 + t * (size.width - 28), y: size.height / 2 + sin(t * .pi * 2) * size.height * 0.2)
+        }
+        var path = Path()
+        path.addLines(points)
+        let c = Color(nsColor: color)
+        let w: CGFloat = 3
+        func line(_ color: Color, _ width: CGFloat, cap: CGLineCap = .round, dash: [CGFloat] = [], phase: CGFloat = 0) {
+            ctx.stroke(path, with: .color(color),
+                       style: SwiftUI.StrokeStyle(lineWidth: width, lineCap: cap, lineJoin: .round, dash: dash, dashPhase: phase))
+        }
+        switch style {
+        case .marker:
+            line(c, w)
+        case .neon:
+            line(c.opacity(0.14), w * 3.6)
+            line(c.opacity(0.32), w * 2)
+            line(c, w)
+            line(Color(nsColor: color.blended(withFraction: 0.7, of: .white) ?? .white), w * 0.38)
+        case .highlighter:
+            line(c.opacity(0.38), w * 3.6, cap: .butt)
+        case .arrow:
+            line(c, w)
+            if let (a, b) = ArrowHead.barbs(for: points, length: 12), let tip = points.last {
+                var head = Path()
+                head.addLines([a, tip, b])
+                ctx.stroke(head, with: .color(c), style: SwiftUI.StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+            }
+        case .dashed:
+            // Same pace as on screen: one dash and gap every 0.6 s.
+            let cycle = w * 4.6
+            line(c, w, dash: [w * 2.4, w * 2.2], phase: -CGFloat(time.truncatingRemainder(dividingBy: 0.6) / 0.6) * cycle)
+        }
+    }
+}
+
+/// Records a shortcut: click, then press the keys. Esc cancels (it is kept for clearing the marks).
+private struct ShortcutRecorder: View {
+    let kind: HighlightKind
+    @ObservedObject var settings: AppSettings
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                monitor == nil ? start() : stop()
+            } label: {
+                Text(monitor != nil ? "按下快捷键…" : settings.shortcuts[kind]?.display ?? "点击录制")
+                    .frame(minWidth: 96)
+            }
+            if settings.shortcuts[kind] != nil, monitor == nil {
+                Button {
+                    settings.setShortcut(nil, for: kind)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("清除")
+            }
+        }
+        .onDisappear { stop() }
+    }
+
+    private func start() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode != 53 { settings.setShortcut(Shortcut(event: event), for: kind) }
+            stop()
+            return nil
+        }
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
+extension Shortcut {
+    init(event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        let symbols = [(NSEvent.ModifierFlags.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘")]
+            .filter { flags.contains($0.0) }.map(\.1).joined()
+        self.init(keyCode: Int64(event.keyCode), modifiers: UInt64(flags.rawValue),
+                  display: symbols + Self.keyName(event))
+    }
+
+    private static let specialKeys: [UInt16: String] = [
+        36: "↩", 48: "⇥", 49: "空格", 51: "⌫", 117: "⌦", 115: "↖", 119: "↘", 116: "⇞", 121: "⇟",
+        123: "←", 124: "→", 125: "↓", 126: "↑",
+        122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10",
+        103: "F11", 111: "F12", 105: "F13", 107: "F14", 113: "F15", 106: "F16", 64: "F17", 79: "F18", 80: "F19", 90: "F20",
+    ]
+
+    private static func keyName(_ event: NSEvent) -> String {
+        if let name = specialKeys[event.keyCode] { return name }
+        // The key's own character, as if no modifier were held (⌥1 reads "1", not "¡").
+        let character = event.characters(byApplyingModifiers: []) ?? event.charactersIgnoringModifiers ?? ""
+        return character.isEmpty ? "键\(event.keyCode)" : character.uppercased()
     }
 }
 
