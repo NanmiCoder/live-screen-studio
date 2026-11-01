@@ -25,7 +25,12 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var latest: Frame?
     private var sequence = 0
     private var stream: SCStream?
+    /// Frames are accepted only from this stream (guarded by `lock`, read on the capture queue).
+    private var acceptedStream: ObjectIdentifier?
     private var configuration: SCStreamConfiguration?
+    /// Bumped by every start, stop and cancel. A start that finds it changed after an await was superseded:
+    /// it shuts its own stream down instead of leaving a second capture running.
+    private var generation = 0
     private(set) var displayID: CGDirectDisplayID?
 
     var latestFrame: Frame? {
@@ -36,11 +41,15 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     var isRunning: Bool { stream != nil }
 
+    /// Throws `CancellationError` if `stop()`, `cancelPendingStart()` or another `start` came first.
     @MainActor
     func start(displayID: CGDirectDisplayID, fps: Int) async throws {
-        await stop()
+        generation += 1
+        let mine = generation
+        await stopStream()
         // Include off-screen windows: our overlay is not visible yet, but the app must be in the list to be excluded.
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard mine == generation else { throw CancellationError() }
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.displayNotFound
         }
@@ -57,33 +66,73 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         let mode = CGDisplayCopyDisplayMode(displayID)
         config.width = mode?.pixelWidth ?? display.width * 2
         config.height = mode?.pixelHeight ?? display.height * 2
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.minimumFrameInterval = Self.interval(fps: fps)
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = false
-        config.queueDepth = 5
+        config.queueDepth = 6
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-        try await stream.startCapture()
+        // Accept its frames before it starts: with a static screen the first frame may be the only complete one.
+        let id = ObjectIdentifier(stream)
+        lock.withLock { acceptedStream = id }
+        do {
+            try await stream.startCapture()
+        } catch {
+            lock.withLock { if acceptedStream == id { acceptedStream = nil } }
+            throw error
+        }
+        guard mine == generation else {
+            lock.withLock { if acceptedStream == id { acceptedStream = nil } }
+            try? await stream.stopCapture()
+            throw CancellationError()
+        }
         self.stream = stream
         self.configuration = config
         self.displayID = displayID
     }
 
+    /// Abandons a start that is still in progress; a stream that is already running is left alone.
+    @MainActor
+    func cancelPendingStart() {
+        generation += 1
+    }
+
     @MainActor
     func setFrameRate(_ fps: Int) async {
         guard let stream, let configuration else { return }
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        configuration.minimumFrameInterval = Self.interval(fps: fps)
         try? await stream.updateConfiguration(configuration)
+    }
+
+    /// An interval exactly equal to the refresh period makes ScreenCaptureKit drop frames that arrive a hair early,
+    /// so ask for 90% of it (as OBS does).
+    private static func interval(fps: Int) -> CMTime {
+        CMTime(seconds: 0.9 / Double(max(fps, 1)), preferredTimescale: 600_000)
+    }
+
+    /// The display's refresh rate, 60 when unknown.
+    static func refreshRate(of displayID: CGDirectDisplayID) -> Int {
+        let rate = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
+        return rate > 0 ? Int(rate.rounded()) : 60
     }
 
     @MainActor
     func stop() async {
+        generation += 1
+        await stopStream()
+    }
+
+    @MainActor
+    private func stopStream() async {
         let stream = self.stream
         self.stream = nil
         configuration = nil
         displayID = nil
-        lock.withLock { latest = nil }
+        lock.withLock {
+            latest = nil
+            acceptedStream = nil
+        }
         try? await stream?.stopCapture()
     }
 
@@ -97,10 +146,11 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
               SCFrameStatus(rawValue: rawStatus) == .complete,
               CMSampleBufferGetImageBuffer(sampleBuffer) != nil
         else { return }
-        lock.lock()
-        sequence += 1
-        latest = Frame(sampleBuffer: sampleBuffer, sequence: sequence)
-        lock.unlock()
+        lock.withLock {
+            guard acceptedStream == ObjectIdentifier(stream) else { return }
+            sequence += 1
+            latest = Frame(sampleBuffer: sampleBuffer, sequence: sequence)
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

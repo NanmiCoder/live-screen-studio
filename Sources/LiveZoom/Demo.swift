@@ -12,6 +12,7 @@ final class Demo {
     }
 
     private let zoom: ZoomController
+    private let presenter: CursorPresenter
     private let screen: NSScreen
     private let outputDir: URL
     private let startTime = CACurrentMediaTime()
@@ -20,9 +21,10 @@ final class Demo {
     private var move: Move?
     private var lines: [String] = []
 
-    init?(zoom: ZoomController, displayID: CGDirectDisplayID, outputDir: URL) {
+    init?(zoom: ZoomController, presenter: CursorPresenter, displayID: CGDirectDisplayID, outputDir: URL) {
         guard let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) else { return nil }
         self.zoom = zoom
+        self.presenter = presenter
         self.screen = screen
         self.outputDir = outputDir
         cursor = CGPoint(x: screen.frame.width * 0.5, y: screen.frame.height * 0.5)
@@ -34,14 +36,15 @@ final class Demo {
 
     func run() {
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-        zoom.managesSystemCursor = false
         zoom.cursorLocation = { [unowned self] in self.global(self.currentCursor()) }
-        zoom.onFrame = { [unowned self] camera in
+        presenter.managesSystemCursor = false
+        presenter.cursorLocation = zoom.cursorLocation
+        zoom.onFrame = { [unowned self] camera, sequence in
             let vp = camera.viewport
             let c = self.currentCursor()
-            self.lines.append(String(format: "%.3f %@ z=%.4f vp=%.1f,%.1f,%.1f,%.1f cursor=%.1f,%.1f",
+            self.lines.append(String(format: "%.3f %@ z=%.4f vp=%.1f,%.1f,%.1f,%.1f cursor=%.1f,%.1f seq=%d",
                                      self.elapsed, "\(camera.phase)", camera.zoom, vp.minX, vp.minY, vp.width, vp.height,
-                                     c.x, c.y))
+                                     c.x, c.y, sequence))
         }
 
         // 1. Overlay at exactly 1× must look identical to the real screen.
@@ -65,8 +68,12 @@ final class Demo {
         at(3.25) { self.shot("2-zooming") }
         at(4.0) { self.shot("3-zoomed") }
         at(4.2) { self.moveTo(x: self.size.width * 0.3 + 80, y: self.size.height * 0.35 + 50, over: 0.8) }
+        // A circled annotation around the cursor; it must stay on the content while the camera pans later.
+        at(5.05) { self.drawCircle(radius: 70, over: 0.4) }
+        at(5.5) { self.shot("3b-drawn") }
         // 3. Fast move to the far corner: the camera should follow at limited speed.
-        at(5.5) { self.mark("follow"); self.moveTo(x: self.size.width * 0.92, y: self.size.height * 0.85, over: 0.4) }
+        at(5.8) { self.mark("follow"); self.moveTo(x: self.size.width * 0.92, y: self.size.height * 0.85, over: 0.4) }
+        at(8.2) { self.click() }
         at(8.4) { self.shot("4-followed") }
         // 4. Wheel adjustment, then zoom out.
         at(8.6) { self.mark("wheel"); self.zoom.adjustZoom(steps: 4) }
@@ -85,6 +92,34 @@ final class Demo {
 
     private func at(_ seconds: Double, _ action: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: action)
+    }
+
+    private func drawCircle(radius: CGFloat, over duration: Double) {
+        let center = currentCursor()
+        let steps = 24
+        mark("draw")
+        zoom.isDrawing = true
+        for i in 0...steps {
+            at(duration * Double(i) / Double(steps)) {
+                let angle = CGFloat(i) / CGFloat(steps) * 2 * .pi
+                let p = self.cg(CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle)))
+                if i == 0 { self.presenter.beginStroke(at: p) } else { self.presenter.moveStroke(to: p, straight: false) }
+                if i == steps { self.zoom.isDrawing = false }
+            }
+        }
+    }
+
+    /// Display-local top-left point → global CG coordinates (top-left origin).
+    private func cg(_ p: CGPoint) -> CGPoint {
+        let g = global(p)
+        return CGPoint(x: g.x, y: NSScreen.screens[0].frame.height - g.y)
+    }
+
+    /// A click mark at the virtual cursor, as the event tap would report it (global CG coordinates).
+    private func click() {
+        let p = global(currentCursor())
+        presenter.click(at: CGPoint(x: p.x, y: NSScreen.screens[0].frame.height - p.y))
+        mark("click")
     }
 
     private func mark(_ name: String) {

@@ -1,12 +1,19 @@
 import AppKit
+import Combine
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private let settings = Settings.shared
+    private let settings = AppSettings.shared
+    private let status = AppStatus()
     private let input = InputTap()
-    private lazy var zoom = ZoomController(zoomLevel: settings.defaultZoom, followPreset: settings.followStyle.preset)
+    private let presenter = CursorPresenter()
+    private lazy var zoom = ZoomController(zoomLevel: settings.defaultZoom, followPreset: settings.followStyle.preset,
+                                           presenter: presenter)
+    private let console = ConsoleWindowController()
     private var statusItem: NSStatusItem!
     private var permissionTimer: Timer?
+    private var settingsObserver: AnyCancellable?
     private var demo: Demo?
+    private var diagnosis: CursorDiagnosis?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -15,36 +22,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        input.triggerButton = Int64(settings.trigger.rawValue)
-        input.isEnabled = settings.enabled
+        status.isInputTapRunning = { [weak self] in self?.input.isRunning ?? false }
+        MainThreadWatch.shared.start {
+            log("main thread stalled; restoring the system cursor and passing input through")
+            CursorRenderer.forceShowSystemCursor()
+        }
         input.onAction = { [weak self] action in
             guard let self else { return }
             switch action {
             case .toggle: zoom.toggle()
             case .adjustZoom(let steps): zoom.adjustZoom(steps: steps)
+            case .click(let location): presenter.click(at: location)
+            case .strokeBegan(let location):
+                presenter.beginStroke(at: location)
+                zoom.isDrawing = true
+            case .strokeMoved(let location, let straight): presenter.moveStroke(to: location, straight: straight)
+            case .strokeEnded:
+                presenter.endStroke()
+                zoom.isDrawing = false
+            case .undoStroke: presenter.undoStroke()
+            case .clearStrokes: presenter.clearStrokes(animated: true)
             }
+        }
+        zoom.onDrawingAvailable = { [weak self] available in
+            guard let self else { return }
+            input.drawingArmed = available && settings.drawWhileZoomed
+        }
+        presenter.onStrokesChanged = { [weak self] any in self?.input.hasStrokes = any }
+        applySettings()
+        settingsObserver = settings.objectWillChange.sink { [weak self] _ in
+            // objectWillChange fires before the new value is stored.
+            DispatchQueue.main.async { self?.applySettings() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.zoom.reset()
+            self?.presenter.resetDisplays()
         }
 
         let args = CommandLine.arguments
+        // Shows only the console on one page, without taking over the cursor or the mouse (for screenshots).
+        if let index = args.firstIndex(of: "--console-preview") {
+            console.show(settings: settings, status: status, section: args.count > index + 1 ? args[index + 1] : nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                log("console window \(self?.console.windowNumber ?? -1)")
+            }
+            return
+        }
+        if let index = args.firstIndex(of: "--cursor-diagnose"), args.count > index + 1 {
+            diagnosis = CursorDiagnosis(presenter: presenter, outputDir: URL(fileURLWithPath: args[index + 1]))
+            presenter.start()
+            diagnosis?.run()
+            return
+        }
         if let index = args.firstIndex(of: "--demo"), args.count > index + 2, let id = UInt32(args[index + 1]) {
-            demo = Demo(zoom: zoom, displayID: id, outputDir: URL(fileURLWithPath: args[index + 2]))
-            demo?.run()
+            demo = Demo(zoom: zoom, presenter: presenter, displayID: id, outputDir: URL(fileURLWithPath: args[index + 2]))
+            guard let demo else {
+                let ids = NSScreen.screens.compactMap { $0.displayID }.map(String.init).joined(separator: ", ")
+                log("demo: no display \(id); available: \(ids)")
+                exit(1)
+            }
+            demo.run()
+            presenter.start()
             return
         }
 
         if !Permissions.screenRecording { Permissions.requestScreenRecording() }
         if !Permissions.accessibility { Permissions.requestAccessibility() }
         startInputTap()
-
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.zoom.reset()
+        presenter.start()
+        if !Permissions.accessibility || !Permissions.screenRecording {
+            console.show(settings: settings, status: status)
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        console.show(settings: settings, status: status)
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         zoom.reset()
+        presenter.shutdown()
+    }
+
+    private func applySettings() {
+        input.isEnabled = settings.enabled
+        input.triggerButton = Int64(settings.trigger.rawValue)
+        zoom.followPreset = settings.followStyle.preset
+        zoom.zoomLevel = settings.defaultZoom
+        if !settings.enabled, zoom.isZooming { zoom.reset() }
+        // Only on an actual change: re-arming resets any gesture in progress.
+        let armed = zoom.isDrawingAvailable && settings.drawWhileZoomed
+        if input.drawingArmed != armed { input.drawingArmed = armed }
+
+        presenter.style = settings.cursorStyle
+        presenter.sizeScale = settings.cursorSize
+        presenter.clickEffect = settings.clickEffect
+        presenter.clickColor = settings.clickColor.color
+        presenter.smoothing = settings.smoothCursor
+        presenter.idleDelay = settings.hideIdleCursor ? settings.idleDelay : nil
+        presenter.alwaysOn = settings.customCursorAlways
+        presenter.isEnabled = settings.enabled
     }
 
     /// The event tap needs Accessibility permission; keep retrying until it is granted.
@@ -68,45 +148,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         let ready = input.isRunning && Permissions.screenRecording
-        let status = ready
-            ? "就绪 · 点击\(settings.trigger.title)放大"
-            : "需要授权后才能使用"
-        menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
-        if !Permissions.accessibility {
-            menu.addItem(item("授权「辅助功能」…", #selector(openAccessibility)))
-        }
-        if !Permissions.screenRecording {
-            menu.addItem(item("授权「屏幕录制」…（授权后需重启 App）", #selector(openScreenRecording)))
-        }
+        let title = ready ? "就绪 · 单击\(settings.trigger.title)放大" : "需要授权后才能使用"
+        menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
 
         let enabled = item("启用", #selector(toggleEnabled))
         enabled.state = settings.enabled ? .on : .off
         menu.addItem(enabled)
-
-        menu.addItem(submenu("默认倍数", Settings.zoomLevels.map { level in
-            let entry = item(String(format: "%g×", level), #selector(selectZoom(_:)))
-            entry.representedObject = level
-            entry.state = settings.defaultZoom == level ? .on : .off
-            return entry
-        }))
-        menu.addItem(submenu("触发键", TriggerButton.allCases.map { button in
-            let entry = item(button.title, #selector(selectTrigger(_:)))
-            entry.representedObject = button.rawValue
-            entry.state = settings.trigger == button ? .on : .off
-            return entry
-        }))
-        menu.addItem(submenu("跟随速度", FollowStyle.allCases.map { style in
-            let entry = item(style.title, #selector(selectFollow(_:)))
-            entry.representedObject = style.rawValue
-            entry.state = settings.followStyle == style ? .on : .off
-            return entry
-        }))
-
-        menu.addItem(.separator())
-        let hint = NSMenuItem(title: "按住触发键滚动滚轮可调倍数，⌥ + 触发键为原始点击", action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
+        menu.addItem(item("打开控制台…", #selector(openConsole), key: ","))
         menu.addItem(.separator())
         menu.addItem(item("退出 LiveZoom", #selector(quit), key: "q"))
     }
@@ -117,46 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
-        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let menu = NSMenu()
-        items.forEach(menu.addItem)
-        parent.submenu = menu
-        return parent
-    }
-
     @objc private func toggleEnabled() {
         settings.enabled.toggle()
-        input.isEnabled = settings.enabled
-        if !settings.enabled { zoom.reset() }
     }
 
-    @objc private func selectZoom(_ sender: NSMenuItem) {
-        guard let level = sender.representedObject as? Double else { return }
-        settings.defaultZoom = level
-        zoom.zoomLevel = level
-    }
-
-    @objc private func selectTrigger(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? Int, let button = TriggerButton(rawValue: raw) else { return }
-        settings.trigger = button
-        input.triggerButton = Int64(raw)
-    }
-
-    @objc private func selectFollow(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let style = FollowStyle(rawValue: raw) else { return }
-        settings.followStyle = style
-        zoom.followPreset = style.preset
-    }
-
-    @objc private func openAccessibility() {
-        Permissions.requestAccessibility()
-        Permissions.openAccessibilitySettings()
-    }
-
-    @objc private func openScreenRecording() {
-        Permissions.requestScreenRecording()
-        Permissions.openScreenRecordingSettings()
+    @objc private func openConsole() {
+        console.show(settings: settings, status: status)
     }
 
     @objc private func quit() {
