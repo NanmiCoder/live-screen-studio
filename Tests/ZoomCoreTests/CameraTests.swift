@@ -101,24 +101,148 @@ final class CameraTests: XCTestCase {
         }
     }
 
-    func testFollowIsSpeedLimitedAndEventuallyShowsCursor() {
-        var config = ZoomCamera.Config()
-        config.follow = .calm
-        let camera = ZoomCamera(display: display, config: config)
-        camera.zoomIn(to: 2, cursor: CGPoint(x: 400, y: 400), now: 0)
-        var t = run(camera, cursor: CGPoint(x: 400, y: 400), from: 0, seconds: 1)
-        let far = CGPoint(x: 2200, y: 1400)
+    func testFollowInsideViewportUsesBaseSpeed() {
+        let camera = ZoomCamera(display: display)
+        camera.zoomIn(to: 2, cursor: CGPoint(x: 1152, y: 768), now: 0)
+        var t = run(camera, cursor: CGPoint(x: 1152, y: 768), from: 0, seconds: 1)
+        // Viewport is 1152x768 centred on the display: x 576...1728. This cursor is outside the
+        // safe zone but still visible, so no catch-up boost applies.
+        let cursor = CGPoint(x: 1700, y: 768)
         var last = camera.center
         var maxVisualSpeed: CGFloat = 0
-        t = run(camera, cursor: far, from: t, seconds: 4) { _ in
+        t = run(camera, cursor: cursor, from: t, seconds: 3) { _ in
             let step = hypot(camera.center.x - last.x, camera.center.y - last.y)
             maxVisualSpeed = max(maxVisualSpeed, step * camera.zoom / CGFloat(self.frame))
             last = camera.center
         }
         XCTAssertLessThanOrEqual(maxVisualSpeed, FollowPreset.calm.maxVisualSpeed + 0.5)
-        XCTAssertGreaterThan(maxVisualSpeed, FollowPreset.calm.maxVisualSpeed * 0.5)
-        XCTAssertTrue(camera.viewport.contains(far))
+        XCTAssertGreaterThan(maxVisualSpeed, 0)
         _ = t
+    }
+
+    func testFlungCursorComesBackIntoViewQuickly() {
+        let camera = ZoomCamera(display: display)
+        camera.zoomIn(to: 2, cursor: CGPoint(x: 400, y: 400), now: 0)
+        var t = run(camera, cursor: CGPoint(x: 400, y: 400), from: 0, seconds: 1)
+        let far = CGPoint(x: 2200, y: 1400)
+        var last = camera.center
+        var maxVisualSpeed: CGFloat = 0
+        var visibleAfter: Double?
+        let start = t
+        t = run(camera, cursor: far, from: t, seconds: 4) { now in
+            let step = hypot(camera.center.x - last.x, camera.center.y - last.y)
+            maxVisualSpeed = max(maxVisualSpeed, step * camera.zoom / CGFloat(self.frame))
+            last = camera.center
+            if visibleAfter == nil, camera.viewport.contains(far) { visibleAfter = now - start }
+        }
+        let limit = FollowPreset.calm.maxVisualSpeed * camera.config.catchUpLimit
+        XCTAssertLessThanOrEqual(maxVisualSpeed, limit + 0.5)
+        // A jump across the whole display diagonal; without the boost this takes about 3 s.
+        XCTAssertLessThan(try XCTUnwrap(visibleAfter), 1.5)
+        // Ends up inside the safe zone, not just barely visible.
+        let settled = ViewportMath.applySafeZone(center: camera.center, cursor: far, zoom: camera.zoom,
+                                                 display: display, margin: FollowPreset.calm.margin)
+        XCTAssertEqual(ViewportMath.clampCenter(settled, zoom: camera.zoom, display: display).x, camera.center.x, accuracy: 0.5)
+    }
+
+    func testFollowMakesOneDecisiveMoveThenRests() {
+        let camera = ZoomCamera(display: display)
+        let start = CGPoint(x: 1152, y: 768)
+        camera.zoomIn(to: 2, cursor: start, now: 0)
+        var t = run(camera, cursor: start, from: 0, seconds: 1)
+        // Viewport x 576...1728, calm safe zone x 864...1440. Cross it slightly to the right.
+        let crossing = CGPoint(x: 1460, y: 768)
+        var moving = 0
+        var subPixelFrames = 0
+        var last = camera.center
+        t = run(camera, cursor: crossing, from: t, seconds: 4) { _ in
+            let step = hypot(camera.center.x - last.x, camera.center.y - last.y) * camera.zoom
+            if step > 0 { moving += 1 }
+            if step > 0, step < 0.5 { subPixelFrames += 1 }
+            last = camera.center
+        }
+        // No long tail of sub-pixel creeping (only the final landing frame may be shorter).
+        XCTAssertLessThanOrEqual(subPixelFrames, 1)
+        // The cursor now sits at the settle margin from the right edge, inside the safe zone.
+        let vp = camera.viewport
+        XCTAssertEqual((vp.maxX - crossing.x) / vp.width, FollowPreset.calm.settleMargin, accuracy: 0.01)
+        // The camera came fully to rest (no sub-pixel creeping).
+        XCTAssertLessThan(moving, 150)
+        let rested = camera.center
+        // Small wobbles near where the cursor is now do not move the camera again.
+        for dx in [CGFloat(-60), 60, -30, 30] {
+            t = run(camera, cursor: CGPoint(x: crossing.x + dx, y: 768), from: t, seconds: 0.3)
+        }
+        XCTAssertEqual(camera.center, rested)
+    }
+
+    func testPausedFollowHoldsTheCamera() {
+        let camera = ZoomCamera(display: display)
+        camera.zoomIn(to: 2, cursor: CGPoint(x: 1152, y: 768), now: 0)
+        var t = run(camera, cursor: CGPoint(x: 1152, y: 768), from: 0, seconds: 1)
+        let held = camera.center
+        camera.followPaused = true
+        t = run(camera, cursor: CGPoint(x: 1720, y: 1100), from: t, seconds: 1)
+        XCTAssertEqual(camera.center, held)
+        camera.followPaused = false
+        _ = run(camera, cursor: CGPoint(x: 1720, y: 1100), from: t, seconds: 2)
+        XCTAssertNotEqual(camera.center, held)
+    }
+
+    func testWheelDuringZoomInIsDeferredWithoutJumps() {
+        let camera = ZoomCamera(display: display)
+        let cursor = CGPoint(x: 1152, y: 768)
+        camera.zoomIn(to: 2, cursor: cursor, now: 0)
+        var lastLog = log(camera.zoom)
+        var maxStep: CGFloat = 0
+        var t = 0.0
+        for i in 0..<180 {
+            t += frame
+            // A free-spinning wheel: several notches arriving during the transition.
+            if (12...16).contains(i) { camera.adjustZoom(by: 1.1) }
+            camera.update(cursor: cursor, now: t, dt: frame)
+            maxStep = max(maxStep, abs(log(camera.zoom) - lastLog))
+            lastLog = log(camera.zoom)
+        }
+        // No single frame zooms more than the eased transition itself does at its peak.
+        XCTAssertLessThan(maxStep, 0.07)
+        XCTAssertEqual(camera.zoom, 2 * pow(1.1, 5), accuracy: 1e-6)
+    }
+
+    func testCatchUpEndsWithoutAbruptBraking() {
+        let camera = ZoomCamera(display: display)
+        camera.zoomIn(to: 2, cursor: CGPoint(x: 400, y: 400), now: 0)
+        var t = run(camera, cursor: CGPoint(x: 400, y: 400), from: 0, seconds: 1)
+        var last = camera.center
+        var lastSpeed: CGFloat = 0
+        var maxDrop: CGFloat = 0
+        t = run(camera, cursor: CGPoint(x: 2200, y: 1400), from: t, seconds: 4) { _ in
+            let speed = hypot(camera.center.x - last.x, camera.center.y - last.y) * camera.zoom / CGFloat(self.frame)
+            maxDrop = max(maxDrop, lastSpeed - speed)
+            lastSpeed = speed
+            last = camera.center
+        }
+        // Speed may fall at most ~150 pt/s from one frame to the next (no emergency stop).
+        XCTAssertLessThan(maxDrop, 150)
+        _ = t
+    }
+
+    func testWheelZoomLandsWithoutSubPixelTail() {
+        let camera = ZoomCamera(display: display)
+        let cursor = CGPoint(x: 1152, y: 768)
+        camera.zoomIn(to: 2, cursor: cursor, now: 0)
+        let t = run(camera, cursor: cursor, from: 0, seconds: 1)
+        camera.adjustZoom(by: 1.1)
+        var lastZoom = camera.zoom
+        var tinyFrames = 0
+        _ = run(camera, cursor: cursor, from: t, seconds: 2) { _ in
+            // How far the far edge of the screen moved this frame, in points.
+            let edgeMove = abs(log(camera.zoom) - log(lastZoom)) * self.display.width
+            if edgeMove > 0, edgeMove < 0.5 { tinyFrames += 1 }
+            lastZoom = camera.zoom
+        }
+        XCTAssertLessThanOrEqual(tinyFrames, 1)
+        XCTAssertEqual(camera.zoom, 2.2, accuracy: 1e-9)
     }
 
     func testZoomOutReturnsExactlyToIdentity() {
@@ -157,14 +281,14 @@ final class CameraTests: XCTestCase {
         camera.zoomIn(to: 2, cursor: cursor, now: 0)
         var t = run(camera, cursor: cursor, from: 0, seconds: 1)
         let before = camera.screenPoint(for: cursor)
-        camera.adjustZoom(by: 1.5, cursor: cursor)
+        camera.adjustZoom(by: 1.5)
         t = run(camera, cursor: cursor, from: t, seconds: 1) { _ in
             let p = camera.screenPoint(for: cursor)
             XCTAssertEqual(p.x, before.x, accuracy: 0.5)
             XCTAssertEqual(p.y, before.y, accuracy: 0.5)
         }
         XCTAssertEqual(camera.zoom, 3, accuracy: 1e-6)
-        camera.adjustZoom(by: 10, cursor: cursor)
+        camera.adjustZoom(by: 10)
         _ = run(camera, cursor: cursor, from: t, seconds: 1)
         XCTAssertEqual(camera.zoom, camera.config.maxZoom, accuracy: 1e-6)
     }

@@ -1,11 +1,10 @@
 import AppKit
 import QuartzCore
 
-/// Full-screen, click-through window showing the zoomed capture and a redrawn cursor.
+/// Full-screen, click-through window showing the zoomed capture.
 /// It stays capturable, so OBS display capture picks it up like any other window.
 final class OverlayWindow: NSWindow {
     private let imageLayer = CALayer()
-    private let cursorLayer = CALayer()
     private let displaySize: CGSize
 
     init(screen: NSScreen) {
@@ -13,7 +12,10 @@ final class OverlayWindow: NSWindow {
         super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
         level = .screenSaver
         backgroundColor = .black
-        isOpaque = true
+        // macOS can mark windows below a fully opaque window as occluded (seen for windows of the same app), and
+        // occluded browsers stop painting, which would stall the zoomed view. 99.9% opacity rules that out.
+        isOpaque = false
+        alphaValue = 0.999
         hasShadow = false
         ignoresMouseEvents = true
         isReleasedWhenClosed = false
@@ -30,11 +32,7 @@ final class OverlayWindow: NSWindow {
         imageLayer.frame = CGRect(origin: .zero, size: displaySize)
         imageLayer.contentsGravity = .resize
         imageLayer.magnificationFilter = .linear
-        cursorLayer.contentsGravity = .resize
-        cursorLayer.minificationFilter = .trilinear
-        cursorLayer.magnificationFilter = .linear
         root.addSublayer(imageLayer)
-        root.addSublayer(cursorLayer)
         setFrame(screen.frame, display: false)
     }
 
@@ -42,10 +40,15 @@ final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    /// - Parameters:
-    ///   - viewport: Visible part of the display, top-left origin, in points.
-    ///   - cursorFrame: Where to draw the cursor on the overlay, top-left origin; nil hides it.
-    func render(surface: IOSurface?, viewport: CGRect, cursorImage: CGImage?, cursorFrame: CGRect?) {
+    func clear() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageLayer.contents = nil
+        CATransaction.commit()
+    }
+
+    /// - Parameter viewport: Visible part of the display, top-left origin, in points.
+    func render(surface: IOSurface?, viewport: CGRect) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if let surface, (imageLayer.contents as AnyObject?) !== surface {
@@ -58,14 +61,6 @@ final class OverlayWindow: NSWindow {
             width: viewport.width / displaySize.width,
             height: viewport.height / displaySize.height
         )
-        if let cursorImage, let cursorFrame {
-            if (cursorLayer.contents as AnyObject?) !== cursorImage { cursorLayer.contents = cursorImage }
-            cursorLayer.frame = CGRect(x: cursorFrame.minX, y: displaySize.height - cursorFrame.maxY,
-                                       width: cursorFrame.width, height: cursorFrame.height)
-            cursorLayer.isHidden = false
-        } else {
-            cursorLayer.isHidden = true
-        }
         CATransaction.commit()
     }
 }

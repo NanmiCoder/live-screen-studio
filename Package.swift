@@ -6,12 +6,14 @@ let package = Package(
     platforms: [.macOS(.v14)],
     targets: [
         .target(name: "ZoomCore"),
+        .target(name: "CursorKit", dependencies: ["ZoomCore"]),
         .executableTarget(
             name: "LiveZoom",
-            dependencies: ["ZoomCore"],
+            dependencies: ["ZoomCore", "CursorKit"],
             linkerSettings: [.linkedFramework("ScreenCaptureKit")]
         ),
         .testTarget(name: "ZoomCoreTests", dependencies: ["ZoomCore"]),
+        .testTarget(name: "CursorKitTests", dependencies: ["CursorKit"]),
     ],
     swiftLanguageModes: [.v5]
 )
