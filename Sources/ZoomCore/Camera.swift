@@ -32,6 +32,21 @@ public enum ViewportMath {
                 y: anchor.y + (display.height / 2 - screenPoint.y) / zoom)
     }
 
+    /// `viewport` moved by less than one output pixel so that its origin falls on whole output pixels (at
+    /// `pixelsPerPoint`). Panning by whole output pixels at a constant zoom shows an exact, shifted copy of the
+    /// previous frame; at any other offset the magnified text is resampled differently every frame and shimmers.
+    /// Never moves past the display's far edge.
+    public static func pixelAligned(_ viewport: CGRect, zoom: CGFloat, pixelsPerPoint: CGFloat, display: CGSize) -> CGRect {
+        let step = 1 / (zoom * pixelsPerPoint)
+        func align(_ value: CGFloat, max limit: CGFloat) -> CGFloat {
+            min((value / step).rounded() * step, (limit / step).rounded(.down) * step)
+        }
+        var aligned = viewport
+        aligned.origin = CGPoint(x: max(align(viewport.minX, max: display.width - viewport.width), 0),
+                                 y: max(align(viewport.minY, max: display.height - viewport.height), 0))
+        return aligned
+    }
+
     /// Leaves `center` alone while `cursor` is inside the safe zone (`margin` from each edge). Once the cursor
     /// crosses it, moves just far enough that the cursor sits `settleMargin` from that edge: deeper than `margin`,
     /// so the camera makes one decisive move instead of creeping along with the cursor.

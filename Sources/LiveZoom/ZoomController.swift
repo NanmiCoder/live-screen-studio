@@ -305,12 +305,24 @@ final class ZoomController: NSObject {
             heldFrames.append(frame)
             if heldFrames.count > 2 { heldFrames.removeFirst() }
         }
-        overlay.render(surface: heldFrames.last?.surface, viewport: camera.viewport)
+        overlay.render(surface: heldFrames.last?.surface, viewport: shownViewport(camera))
+    }
+
+    /// The part of the display on screen. While the zoom holds still it is snapped to whole output pixels, so a
+    /// pan shifts the magnified picture as it is instead of resampling (and shimmering) its text every frame.
+    private func shownViewport(_ camera: ZoomCamera) -> CGRect {
+        guard camera.phase == .zoomed, camera.zoom == camera.targetZoom, let screen else { return camera.viewport }
+        return ViewportMath.pixelAligned(camera.viewport, zoom: camera.zoom, pixelsPerPoint: screen.backingScaleFactor,
+                                         display: camera.display)
     }
 
     private func mapping(for camera: ZoomCamera, displayID: CGDirectDisplayID) -> CursorPresenter.ZoomMapping {
-        CursorPresenter.ZoomMapping(displayID: displayID, map: { camera.screenPoint(for: $0) }, scale: camera.zoom,
-                                    origin: camera.viewport.origin, holdsCursor: cursorBounds != nil)
+        // The cursor and ink use the same (possibly snapped) viewport as the picture, so they stay on the content.
+        let origin = shownViewport(camera).origin
+        let zoom = camera.zoom
+        return CursorPresenter.ZoomMapping(displayID: displayID,
+                                           map: { CGPoint(x: ($0.x - origin.x) * zoom, y: ($0.y - origin.y) * zoom) },
+                                           scale: zoom, origin: origin, holdsCursor: cursorBounds != nil)
     }
 
     private func overlay(for screen: NSScreen, displayID: CGDirectDisplayID) -> OverlayWindow {

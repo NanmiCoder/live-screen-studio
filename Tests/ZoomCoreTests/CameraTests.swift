@@ -305,4 +305,30 @@ final class CameraTests: XCTestCase {
         XCTAssertEqual(p.x, target.x, accuracy: 0.01)
         XCTAssertEqual(p.y, target.y, accuracy: 0.01)
     }
+
+    func testPixelAlignedPanningShowsShiftedCopies() {
+        let display = CGSize(width: 2304, height: 1536)
+        for zoom: CGFloat in [1.5, 2, 1.75] {
+            let size = ViewportMath.size(display: display, zoom: zoom)
+            for x in stride(from: 100.0, to: 101.0, by: 0.037) {
+                let aligned = ViewportMath.pixelAligned(CGRect(origin: CGPoint(x: x, y: 333.3), size: size), zoom: zoom,
+                                                        pixelsPerPoint: 2, display: display)
+                // The origin in output pixels is whole: every frame samples the source at the same phases.
+                let pixels = aligned.minX * zoom * 2
+                XCTAssertEqual(pixels, pixels.rounded(), accuracy: 1e-6)
+                let rows = aligned.minY * zoom * 2
+                XCTAssertEqual(rows, rows.rounded(), accuracy: 1e-6)
+                // Off by less than half an output pixel.
+                XCTAssertLessThanOrEqual(abs(aligned.minX - x) * zoom * 2, 0.5 + 1e-9)
+            }
+            // Never past the far edge, never before the near one.
+            let right = ViewportMath.pixelAligned(CGRect(origin: CGPoint(x: display.width - size.width, y: 0), size: size),
+                                                  zoom: zoom, pixelsPerPoint: 2, display: display)
+            XCTAssertLessThanOrEqual(right.maxX, display.width + 1e-9)
+            XCTAssertGreaterThan(right.maxX, display.width - 1 / (zoom * 2) - 1e-9)
+            let left = ViewportMath.pixelAligned(CGRect(origin: .zero, size: size), zoom: zoom, pixelsPerPoint: 2,
+                                                 display: display)
+            XCTAssertEqual(left.origin, .zero)
+        }
+    }
 }
