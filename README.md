@@ -54,7 +54,7 @@
 - `LiveZoom-<版本>-macos-apple-silicon.zip`：M 系列芯片
 - `LiveZoom-<版本>-macos-intel.zip`：Intel 芯片
 
-发布包是 ad-hoc 签名，没有经过公证。第一次打开如果被系统拦截，在终端执行 `xattr -dr com.apple.quarantine /Applications/LiveZoom.app`，或在「系统设置 → 隐私与安全性」里点「仍要打开」。ad-hoc 签名下，每次升级后都要重新授权辅助功能和屏幕录制；想固定授权，请自己编译。
+发布包使用 Developer ID 签名并经过公证，可以直接打开。v0.2.0 是 ad-hoc 签名，没有公证：第一次打开如果被系统拦截，在终端执行 `xattr -dr com.apple.quarantine /Applications/LiveZoom.app`，或在「系统设置 → 隐私与安全性」里点「仍要打开」。ad-hoc 签名下，每次升级后都要重新授权辅助功能和屏幕录制。
 
 ### 从源码编译
 

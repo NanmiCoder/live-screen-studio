@@ -35,8 +35,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 仓库配了签名 secrets 就用 Developer ID 签名；没配（例如 fork 的 PR 拿不到 secrets）则退回 ad-hoc 签名
+      - name: Import Developer ID certificate
+        id: cert
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
+            echo "::notice::No signing secrets; the app will be signed ad-hoc."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application:/ { print $2; exit }')"
+          if [ -z "$identity" ]; then
+            echo "::error::The certificate does not contain a Developer ID Application identity."
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
       - name: Build LiveZoom.app (${{ matrix.arch }})
         run: ARCH=${{ matrix.arch }} scripts/build-app.sh
+
+      - name: Verify signature
+        run: codesign -dvv build/LiveZoom.app 2>&1 | grep -E "Authority|Signature|flags|TeamIdentifier" || true
+
+      # 公证要几分钟，只在发布（v* 标签）和手动触发时做
+      - name: Notarize
+        if: steps.cert.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent build/LiveZoom.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarize.json"
+          if [ "$(jq -r .status "$RUNNER_TEMP/notarize.json")" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id "$RUNNER_TEMP/notarize.json")" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+            echo "::error::Notarization was not accepted."
+            exit 1
+          fi
+          xcrun stapler staple build/LiveZoom.app
+          spctl --assess --type execute -vv build/LiveZoom.app
 
       - name: Check architecture
         run: |
