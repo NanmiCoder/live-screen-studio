@@ -4,12 +4,15 @@
 #   scripts/build-app.sh            release build
 #   scripts/build-app.sh debug      debug build
 #   CODESIGN_IDENTITY="..." scripts/build-app.sh
+#   ARCH=x86_64 scripts/build-app.sh   build for one architecture (arm64 or x86_64)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
-swift build -c "$CONFIG"
-BIN="$(swift build -c "$CONFIG" --show-bin-path)/LiveZoom"
+ARCH_FLAGS=()
+if [ -n "${ARCH:-}" ]; then ARCH_FLAGS=(--arch "$ARCH"); fi
+swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
+BIN="$(swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)/LiveZoom"
 
 APP=build/LiveZoom.app
 rm -rf "$APP"

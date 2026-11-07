@@ -47,6 +47,17 @@
 
 ## 安装
 
+### 下载
+
+在 [Releases](https://github.com/NanmiCoder/live-screen-studio/releases) 下载对应芯片的版本，解压后拖进「应用程序」：
+
+- `LiveZoom-<版本>-macos-apple-silicon.zip`：M 系列芯片
+- `LiveZoom-<版本>-macos-intel.zip`：Intel 芯片
+
+发布包是 ad-hoc 签名，没有经过公证。第一次打开如果被系统拦截，在终端执行 `xattr -dr com.apple.quarantine /Applications/LiveZoom.app`，或在「系统设置 → 隐私与安全性」里点「仍要打开」。ad-hoc 签名下，每次升级后都要重新授权辅助功能和屏幕录制；想固定授权，请自己编译。
+
+### 从源码编译
+
 需要 macOS 14 以上和 Xcode 16 以上（Swift 6 工具链）。
 
 ```bash
@@ -61,7 +72,7 @@ open build/LiveZoom.app
 - **辅助功能**：识别中键、点击和画笔手势。
 - **屏幕录制**：采集要放大的画面。授权后退出并重新打开 LiveZoom。
 
-`build-app.sh` 默认用本机的 Apple Development 证书签名，签名身份固定，重新编译后授权不会丢。可以用 `CODESIGN_IDENTITY` 指定证书；找不到证书时会退回 ad-hoc 签名，这时每次编译后都要重新授权。
+`build-app.sh` 默认用本机的 Apple Development 证书签名，签名身份固定，重新编译后授权不会丢。可以用 `CODESIGN_IDENTITY` 指定证书，用 `ARCH=arm64` 或 `ARCH=x86_64` 指定架构；找不到证书时会退回 ad-hoc 签名，这时每次编译后都要重新授权。
 
 ## 直播小贴士
 
