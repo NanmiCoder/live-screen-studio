@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="512" viewBox="0 0 1200 512" role="img" aria-labelledby="title desc">
+  <title id="title">LiveZoom 标注样式</title>
+  <desc id="desc">放大后左键拖动可用的五种笔触：马克笔、霓虹、荧光笔、箭头、流动虚线；按快捷键自动识别光标所在行的四种高亮：框住、划线、荧光笔涂亮、聚光灯。线宽、透明度和虚线节奏取自 App 的绘制代码。</desc>
+
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .row  { font-size: 23px; font-weight: 600; fill: #f3f5f8; }
+      .hint { font-size: 17px; fill: #9aa2b0; }
+      .name { font-size: 18px; font-weight: 500; fill: #d6dbe3; }
+      .faint { font-size: 13px; fill: #8c94a3; opacity: .42; }
+      .code { font-size: 15px; fill: #d9dee7; }
+      .kw { fill: #ff7ab2; }
+      .lit { fill: #67d8c7; }
+    </style>
+    <clipPath id="hl-cell"><rect width="264" height="160" rx="14"/></clipPath>
+    <!-- Real lines from Sources/ZoomCore: the faint backdrop for strokes and the line being highlighted. -->
+    <g id="faint-code" class="mono faint">
+      <text x="20" y="38" textLength="140" lengthAdjust="spacingAndGlyphs">let x = omega * dt</text>
+      <text x="20" y="60" textLength="117" lengthAdjust="spacingAndGlyphs">output = target</text>
+      <text x="20" y="82" textLength="148" lengthAdjust="spacingAndGlyphs">newVelocity = .zero</text>
+      <text x="20" y="104" textLength="101" lengthAdjust="spacingAndGlyphs">return output</text>
+    </g>
+    <g id="hl-code" class="mono code">
+      <text x="22" y="40" textLength="225" lengthAdjust="spacingAndGlyphs"><tspan class="kw">if</tspan> remaining &lt;= minStep {</text>
+      <text x="58" y="74" textLength="189" lengthAdjust="spacingAndGlyphs">center = targetCenter</text>
+      <text x="58" y="108" textLength="144" lengthAdjust="spacingAndGlyphs">velocity = <tspan class="lit">.zero</tspan></text>
+    </g>
+  </defs>
+
+  <rect width="1200" height="512" rx="22" fill="#0b0e14"/>
+
+  <!-- Row 1: strokes, drawn by left-dragging while zoomed. Width 6; layers follow lineLayers(_:_:width:). -->
+  <g id="strokes-label" class="sans">
+    <text class="row" x="48" y="64">笔触</text>
+    <text class="hint" x="108" y="64">放大后左键拖动 · 按住 ⇧ 画直线 · 笔迹跟着画面移动</text>
+  </g>
+
+  <g id="stroke-marker" transform="translate(48 84)">
+    <rect width="208" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#faint-code"/>
+    <path d="M44 70 C38 44 166 38 178 58 C190 80 70 94 34 76 C24 68 44 50 76 46" fill="none" stroke="#ff3b30" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="sans name" x="20" y="142">马克笔</text>
+  </g>
+
+  <g id="stroke-neon" transform="translate(272 84)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="208" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#faint-code"/>
+    <g>
+      <path id="neon-path" d="M26 98 C58 64 92 124 124 88 S170 64 184 80" stroke="#4099ff" stroke-opacity=".14" stroke-width="21.6"/>
+      <path d="M26 98 C58 64 92 124 124 88 S170 64 184 80" stroke="#4099ff" stroke-opacity=".32" stroke-width="12"/>
+      <path d="M26 98 C58 64 92 124 124 88 S170 64 184 80" stroke="#4099ff" stroke-width="6"/>
+      <path d="M26 98 C58 64 92 124 124 88 S170 64 184 80" stroke="#d9ebff" stroke-width="2.3"/>
+    </g>
+    <text class="sans name" x="20" y="142" stroke="none">霓虹</text>
+  </g>
+
+  <g id="stroke-highlighter" transform="translate(496 84)">
+    <rect width="208" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#faint-code"/>
+    <path d="M16 33 C50 32 110 32 166 34" fill="none" stroke="#ffd11a" stroke-opacity=".38" stroke-width="21.6" stroke-linecap="butt"/>
+    <path d="M16 77 C60 76 120 76 174 78" fill="none" stroke="#ffd11a" stroke-opacity=".38" stroke-width="21.6" stroke-linecap="butt"/>
+    <text class="sans name" x="20" y="142">荧光笔</text>
+  </g>
+
+  <g id="stroke-arrow" transform="translate(720 84)" fill="none" stroke="#ff54b8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="208" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06" stroke-width="1"/>
+    <use href="#faint-code" stroke="none"/>
+    <path d="M36 116 C70 118 128 108 164 54"/>
+    <path d="M146.8 62.5 L164 54 L162.8 73.2"/>
+    <text class="sans name" x="20" y="142" stroke="none">箭头</text>
+  </g>
+
+  <g id="stroke-dashed" transform="translate(944 84)">
+    <rect width="208" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#faint-code"/>
+    <rect x="12" y="44" width="148" height="68" rx="12" fill="none" stroke="#33e080" stroke-width="6" stroke-dasharray="14.4 13.2" stroke-linecap="round"/>
+    <text class="sans name" x="20" y="142">流动虚线</text>
+  </g>
+
+  <!-- Row 2: one-key highlights on the line under the cursor. Geometry follows init(highlight:line:display:look:zoom:). -->
+  <g id="highlights-label" class="sans">
+    <text class="row" x="48" y="292">一键高亮</text>
+    <text class="hint" x="152" y="292">按自己录的快捷键 · 自动识别光标所在的那一行 · 终端、浏览器、PDF 都能用</text>
+  </g>
+
+  <g id="hl-box" transform="translate(48 312)">
+    <rect width="264" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#hl-code"/>
+    <rect x="52" y="60" width="201" height="21" rx="5.25" fill="none" stroke="#ff3b30" stroke-width="2.5"/>
+    <text class="sans name" x="22" y="146">框住这一行</text>
+  </g>
+
+  <g id="hl-underline" transform="translate(328 312)">
+    <rect width="264" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#hl-code"/>
+    <path d="M58 82 H247" stroke="#4099ff" stroke-width="2.5" stroke-linecap="round"/>
+    <text class="sans name" x="22" y="146">划线</text>
+  </g>
+
+  <g id="hl-fill" transform="translate(608 312)">
+    <rect width="264" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#hl-code"/>
+    <path d="M55.5 70.5 H249.5" stroke="#ffd11a" stroke-opacity=".35" stroke-width="21" stroke-linecap="butt"/>
+    <text class="sans name" x="22" y="146">荧光笔涂亮</text>
+  </g>
+
+  <g id="hl-spotlight" transform="translate(888 312)">
+    <rect width="264" height="160" rx="14" fill="#131823" stroke="#ffffff" stroke-opacity=".06"/>
+    <use href="#hl-code"/>
+    <path clip-path="url(#hl-cell)" fill="#000000" fill-opacity=".55" fill-rule="evenodd" d="M0 0 H264 V160 H0 Z M57.25 60 H247.75 A5.25 5.25 0 0 1 253 65.25 V75.75 A5.25 5.25 0 0 1 247.75 81 H57.25 A5.25 5.25 0 0 1 52 75.75 V65.25 A5.25 5.25 0 0 1 57.25 60 Z"/>
+    <rect x="52" y="60" width="201" height="21" rx="5.25" fill="none" stroke="#ff3b30" stroke-opacity=".85" stroke-width="1.5"/>
+    <text class="sans name" x="22" y="146">聚光灯</text>
+  </g>
+</svg>
