@@ -4,6 +4,7 @@
 #   scripts/build-app.sh            release build
 #   scripts/build-app.sh debug      debug build
 #   CODESIGN_IDENTITY="..." scripts/build-app.sh
+#   CODESIGN_IDENTITY="Developer ID Application: ..." also enables the hardened runtime (for notarization)
 #   ARCH=x86_64 scripts/build-app.sh   build for one architecture (arm64 or x86_64)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,6 +31,11 @@ if [ -z "$identity" ]; then
   identity="-"
   echo "warning: no Apple Development identity found; signing ad-hoc, so permissions reset on every build" >&2
 fi
-codesign --force --sign "$identity" "$APP"
+sign_args=(--force --sign "$identity")
+# Developer ID builds get the hardened runtime and a secure timestamp, which notarization requires.
+if [[ "$identity" == "Developer ID Application:"* ]]; then
+  sign_args+=(--options runtime --timestamp)
+fi
+codesign "${sign_args[@]}" "$APP"
 codesign --verify --strict "$APP"
 echo "Built $APP (signed with: $identity)"
