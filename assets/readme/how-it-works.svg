@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="384" viewBox="0 0 1200 384" role="img" aria-labelledby="title desc">
+  <title id="title">LiveZoom 工作原理</title>
+  <desc id="desc">三层叠在同一块屏幕上：最下面是真实桌面，由 ScreenCaptureKit 采集；中间是鼠标穿透的全屏窗口，按镜头位置裁剪采集画面来实现放大；最上层重画光标、点击效果和笔迹。OBS 的 macOS 屏幕采集直接拿到叠好的画面，不用改设置。</desc>
+
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .layer { font-size: 22px; font-weight: 600; fill: #f3f5f8; }
+      .sub { font-size: 17px; fill: #9aa2b0; }
+      .mod { font-size: 14px; fill: #6aa8ff; }
+    </style>
+    <!-- A plane is drawn in flat 380x240 screen coordinates, then laid back with skewX + vertical squash. -->
+    <g id="bars-1x">
+      <rect x="20" y="34" width="120" height="7" rx="3.5" fill="#5b6476"/>
+      <rect x="20" y="50" width="86" height="7" rx="3.5" fill="#7b5bd6"/>
+      <rect x="40" y="66" width="150" height="7" rx="3.5" fill="#3d7bd9"/>
+      <rect x="40" y="82" width="104" height="7" rx="3.5" fill="#8c94a3"/>
+      <rect x="40" y="98" width="196" height="7" rx="3.5" fill="#5b6476"/>
+      <rect x="60" y="114" width="128" height="7" rx="3.5" fill="#3d7bd9"/>
+      <rect x="60" y="130" width="170" height="7" rx="3.5" fill="#8c94a3"/>
+      <rect x="60" y="146" width="92" height="7" rx="3.5" fill="#7b5bd6"/>
+      <rect x="40" y="162" width="140" height="7" rx="3.5" fill="#5b6476"/>
+      <rect x="40" y="178" width="210" height="7" rx="3.5" fill="#3d7bd9"/>
+      <rect x="20" y="194" width="74" height="7" rx="3.5" fill="#8c94a3"/>
+      <rect x="20" y="210" width="160" height="7" rx="3.5" fill="#5b6476"/>
+      <rect x="250" y="34" width="110" height="7" rx="3.5" fill="#5b6476"/>
+      <rect x="250" y="50" width="84" height="7" rx="3.5" fill="#3d7bd9"/>
+      <rect x="250" y="66" width="100" height="7" rx="3.5" fill="#8c94a3"/>
+    </g>
+    <g id="bars-2x">
+      <rect x="18" y="26" width="220" height="14" rx="7" fill="#8c94a3"/>
+      <rect x="18" y="58" width="300" height="14" rx="7" fill="#5b6476"/>
+      <rect x="58" y="90" width="256" height="14" rx="7" fill="#3d7bd9"/>
+      <rect x="58" y="122" width="300" height="14" rx="7" fill="#8c94a3"/>
+      <rect x="58" y="154" width="184" height="14" rx="7" fill="#7b5bd6"/>
+      <rect x="18" y="186" width="280" height="14" rx="7" fill="#5b6476"/>
+      <rect x="18" y="214" width="150" height="14" rx="7" fill="#3d7bd9"/>
+    </g>
+    <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M1 1 L8 5 L1 9" fill="none" stroke="#f3f5f8" stroke-opacity=".7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="384" rx="22" fill="#0b0e14"/>
+
+  <!-- 1. The real desktop; the dashed box is where the camera is. -->
+  <g id="plane-desktop" transform="translate(136 250) skewX(-41.63) scale(1 .375)">
+    <rect width="380" height="240" rx="12" fill="#161b26" stroke="#ffffff" stroke-opacity=".14" stroke-width="2"/>
+    <use href="#bars-1x"/>
+    <rect x="100" y="60" width="190" height="120" rx="4" fill="#338cff" fill-opacity=".10" stroke="#338cff" stroke-width="3" stroke-dasharray="10 8"/>
+  </g>
+
+  <!-- The camera crop pushes in: from the dashed box up to the zoom layer. -->
+  <g id="push-in" stroke="#338cff" stroke-opacity=".5" stroke-width="1">
+    <line x1="366" y1="317.5" x2="436" y2="240"/>
+    <line x1="176" y1="317.5" x2="56" y2="240"/>
+  </g>
+
+  <!-- 2. Click-through full-screen window that shows the cropped capture, i.e. the zoom. -->
+  <g id="plane-zoom" transform="translate(136 150) skewX(-41.63) scale(1 .375)">
+    <rect width="380" height="240" rx="12" fill="#121a2b" fill-opacity=".96" stroke="#338cff" stroke-opacity=".7" stroke-width="2.5"/>
+    <use href="#bars-2x"/>
+  </g>
+
+  <!-- 3. Top layer: cursor, click ripple and ink, redrawn to match the zoomed picture. -->
+  <g id="plane-ink" transform="translate(136 50) skewX(-41.63) scale(1 .375)">
+    <rect width="380" height="240" rx="12" fill="#ffffff" fill-opacity=".025" stroke="#ffffff" stroke-opacity=".3" stroke-width="2" stroke-dasharray="12 10"/>
+    <path d="M86 122 C70 70 320 62 336 112 C350 160 120 176 70 140 C50 124 90 92 140 88" fill="none" stroke="#ff3b30" stroke-width="7" stroke-linecap="round"/>
+    <g fill="none" stroke="#338cff">
+      <circle cx="262" cy="124" r="16" stroke-width="5" stroke-opacity=".9"/>
+      <circle cx="262" cy="124" r="30" stroke-width="4" stroke-opacity=".45"/>
+      <circle cx="262" cy="124" r="44" stroke-width="3" stroke-opacity=".2"/>
+    </g>
+  </g>
+  <!-- The cursor stands upright at the ripple centre (262,124 on the plane). -->
+  <path transform="translate(356.7 96.5) scale(1.35)" d="M0 0 V22 L5.5 17 L9.5 26 L13 24.5 L9 15.8 H16 Z" fill="#0b0e14" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+
+  <!-- Layer labels -->
+  <g id="labels" class="sans">
+    <text x="548" y="89"><tspan class="layer">③ 光标、点击效果、笔迹</tspan><tspan class="mono mod" dx="12">CursorKit</tspan></text>
+    <text class="sub" x="548" y="117">在最上层重画，点到的就是看到的</text>
+
+    <text x="548" y="189"><tspan class="layer">② 放大画面</tspan><tspan class="mono mod" dx="12">ZoomCore</tspan></text>
+    <text class="sub" x="548" y="217">鼠标穿透的全屏窗口，按镜头裁剪</text>
+
+    <text x="548" y="289"><tspan class="layer">① 真实桌面</tspan><tspan class="mono mod" dx="12">ScreenCaptureKit</tspan></text>
+    <text class="sub" x="548" y="317">采集屏幕，排除自己和 OBS 的窗口</text>
+  </g>
+
+  <!-- The three layers sit on one display; OBS captures the stack as-is. -->
+  <path d="M906 66 H916 V324 H906" fill="none" stroke="#ffffff" stroke-opacity=".3" stroke-width="1.5"/>
+  <path d="M916 195 H956" stroke="#f3f5f8" stroke-opacity=".7" stroke-width="1.6" marker-end="url(#head)"/>
+
+  <g id="obs" transform="translate(966 116)">
+    <rect width="196" height="158" rx="16" fill="#131823" stroke="#ffffff" stroke-opacity=".1"/>
+    <circle cx="26" cy="30" r="5" fill="#ff3b30"/>
+    <text class="mono" x="38" y="35" font-size="14" font-weight="600" fill="#f3f5f8" letter-spacing="1.5">LIVE</text>
+    <text class="sans" x="20" y="82" font-size="32" font-weight="700" fill="#f3f5f8">OBS</text>
+    <text class="sans" x="14" y="110" font-size="16" fill="#9aa2b0">「macOS 屏幕采集」</text>
+    <text class="sans" x="20" y="136" font-size="16" fill="#6aa8ff">直接采到叠好的画面</text>
+  </g>
+</svg>
