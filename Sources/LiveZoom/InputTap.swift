@@ -105,10 +105,15 @@ final class InputTap {
             if let confineTap { CGEvent.tapEnable(tap: confineTap, enable: newValue != nil) }
         }
     }
-    /// The highlight shortcuts; they and Esc only act while armed (zoomed in).
+    /// The highlight shortcuts; they, undo, and Esc only act while armed (zoomed in).
     var shortcuts: [KeyCombo: HighlightKind] {
         get { state.withLock { $0.shortcuts } }
         set { state.withLock { $0.shortcuts = newValue } }
+    }
+    /// Undo-last-stroke shortcut; only acts while zoomed in and strokes/highlights exist.
+    var undoShortcut: KeyCombo? {
+        get { state.withLock { $0.undoShortcut } }
+        set { state.withLock { $0.undoShortcut = newValue } }
     }
     var keysArmed: Bool {
         get { state.withLock { $0.keysArmed } }
@@ -161,6 +166,7 @@ final class InputTap {
         var swallowRightUp = false
         var cursorBounds: CGRect?
         var shortcuts: [KeyCombo: HighlightKind] = [:]
+        var undoShortcut: KeyCombo?
         var keysArmed = false
         /// Keys whose press was taken, so their release is taken too.
         var heldKeys: Set<Int64> = []
@@ -580,6 +586,17 @@ final class InputTap {
                 s.heldKeys.insert(keyCode)
                 // Holding the key down does not repeat the highlight.
                 return .some(repeated ? nil : .highlight(kind))
+            }
+            if let undo = s.undoShortcut, combo == undo {
+                if s.hasStrokes {
+                    s.heldKeys.insert(keyCode)
+                    return .some(.undoStroke)
+                }
+                // Swallow trailing auto-repeats of the same held undo press after the last stroke is gone,
+                // so holding ⌘Z does not spill over and undo in the underlying app.
+                if repeated, s.heldKeys.contains(keyCode) {
+                    return .some(nil)
+                }
             }
             if keyCode == Self.escapeKeyCode, combo.modifiers == 0, s.hasStrokes {
                 s.heldKeys.insert(keyCode)
