@@ -460,12 +460,31 @@ private struct CursorPage: View {
 private struct GeneralPage: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var status: AppStatus
+    @State private var isInstalling = false
 
     var body: some View {
         Form {
             Section {
                 Toggle("启用 LiveZoom", isOn: $settings.enabled)
                 Toggle("登录时自动启动", isOn: Binding(get: { status.launchAtLogin }, set: { status.setLaunchAtLogin($0) }))
+                if !AppInstaller.isInstalled {
+                    LabeledContent {
+                        if isInstalling {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("正在移动…").foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Button("移到\(AppInstaller.targetFolderDisplayName)") {
+                                isInstalling = true
+                                AppInstaller.installFromConsole { isInstalling = false }
+                            }
+                        }
+                    } label: {
+                        Text("安装位置")
+                        Text(AppInstaller.consoleInstallSubtitle).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section {

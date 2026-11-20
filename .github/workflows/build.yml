@@ -35,6 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify release tag matches Info.plist version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Info.plist version $version."
+            exit 1
+          fi
+
       # 仓库配了签名 secrets 就用 Developer ID 签名；没配（例如 fork 的 PR 拿不到 secrets）则退回 ad-hoc 签名
       - name: Import Developer ID certificate
         id: cert
@@ -43,6 +53,10 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           if [ -z "$CERTIFICATE" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error::Release builds require MACOS_CERTIFICATE and MACOS_CERTIFICATE_PASSWORD secrets."
+              exit 1
+            fi
             echo "::notice::No signing secrets; the app will be signed ad-hoc."
             echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -72,44 +86,73 @@ jobs:
       - name: Verify signature
         run: codesign -dvv build/LiveZoom.app 2>&1 | grep -E "Authority|Signature|flags|TeamIdentifier" || true
 
-      # 公证要几分钟，只在发布（v* 标签）和手动触发时做
-      - name: Notarize
+      - name: Check architecture
+        run: |
+          lipo -info build/LiveZoom.app/Contents/MacOS/LiveZoom
+          lipo -info build/LiveZoom.app/Contents/MacOS/LiveZoom | grep -q "${{ matrix.arch }}"
+
+      # 先公证并 staple .app，这样用户拖进「应用程序」后即使离线首次打开也能通过 Gatekeeper 校验
+      - name: Notarize LiveZoom.app
         if: steps.cert.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          ditto -c -k --keepParent build/LiveZoom.app "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::Missing APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, or APPLE_TEAM_ID secret."
+            exit 1
+          fi
+          ditto -c -k --keepParent build/LiveZoom.app "$RUNNER_TEMP/notarize-app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-app.zip" \
             --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-            --wait --output-format json | tee "$RUNNER_TEMP/notarize.json"
-          if [ "$(jq -r .status "$RUNNER_TEMP/notarize.json")" != "Accepted" ]; then
-            xcrun notarytool log "$(jq -r .id "$RUNNER_TEMP/notarize.json")" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarize-app.json"
+          if [ "$(jq -r .status "$RUNNER_TEMP/notarize-app.json")" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id "$RUNNER_TEMP/notarize-app.json")" \
               --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
-            echo "::error::Notarization was not accepted."
+            echo "::error::App notarization was not accepted."
             exit 1
           fi
           xcrun stapler staple build/LiveZoom.app
-          spctl --assess --type execute -vv build/LiveZoom.app
+          xcrun stapler validate build/LiveZoom.app
+          spctl --assess --type execute --ignore-cache -vv build/LiveZoom.app
 
-      - name: Check architecture
-        run: |
-          lipo -info build/LiveZoom.app/Contents/MacOS/LiveZoom
-          lipo -info build/LiveZoom.app/Contents/MacOS/LiveZoom | grep -q "${{ matrix.arch }}"
-
-      - name: Package
+      - name: Package DMG
         id: pkg
         run: |
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
-          zip="LiveZoom-${version}-${{ matrix.name }}.zip"
-          ditto -c -k --keepParent build/LiveZoom.app "$zip"
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          dmg="LiveZoom-${version}-${{ matrix.name }}.dmg"
+          require_layout=0
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then require_layout=1; fi
+          REQUIRE_FINDER_LAYOUT="$require_layout" scripts/build-dmg.sh "$dmg"
+          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
+
+      # 再公证并 staple .dmg 容器，确保挂载镜像本身也通过 Gatekeeper 校验
+      - name: Notarize DMG
+        if: steps.cert.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg="${{ steps.pkg.outputs.dmg }}"
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarize-dmg.json"
+          if [ "$(jq -r .status "$RUNNER_TEMP/notarize-dmg.json")" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id "$RUNNER_TEMP/notarize-dmg.json")" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+            echo "::error::DMG notarization was not accepted."
+            exit 1
+          fi
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --ignore-cache -vv "$dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: LiveZoom-${{ matrix.name }}
-          path: ${{ steps.pkg.outputs.zip }}
+          path: ${{ steps.pkg.outputs.dmg }}
           if-no-files-found: error
 
   release:
@@ -128,7 +171,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg \
             --repo "$GITHUB_REPOSITORY" \
             --title "LiveZoom ${GITHUB_REF_NAME#v}" \
             --generate-notes
