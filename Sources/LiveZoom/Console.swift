@@ -103,6 +103,7 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
     private var statusTimer: Timer?
     private weak var status: AppStatus?
     private let recorderCoordinator = ShortcutRecorderCoordinator()
+    private let visibility = ConsoleVisibility()
 
     var windowNumber: Int? { window?.windowNumber }
 
@@ -111,7 +112,13 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
         if window == nil {
             let initial = section.flatMap(ConsoleSection.init(rawValue:)) ?? .zoom
             let controller = NSHostingController(
-                rootView: ConsoleView(settings: settings, status: status, recorder: recorderCoordinator, initialSection: initial)
+                rootView: ConsoleView(
+                    settings: settings,
+                    status: status,
+                    recorder: recorderCoordinator,
+                    visibility: visibility,
+                    initialSection: initial
+                )
             )
             let window = NSWindow(contentViewController: controller)
             window.title = "LiveZoom 控制台"
@@ -127,6 +134,7 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
             self.window = window
         }
         self.status = status
+        visibility.isVisible = true
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
         if statusTimer == nil {
@@ -139,15 +147,29 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let window else { return }
+        visibility.isVisible = window.occlusionState.contains(.visible)
+    }
+
     func windowWillClose(_ notification: Notification) {
         statusTimer?.invalidate()
         statusTimer = nil
         recorderCoordinator.cancel()
+        visibility.isVisible = false
+        // Tear down the SwiftUI view hierarchy when closed so it consumes zero main-thread DisplayLink work.
+        window?.delegate = nil
+        window?.contentViewController = nil
+        window = nil
     }
 
     func windowDidResignKey(_ notification: Notification) {
         recorderCoordinator.cancel()
     }
+}
+
+final class ConsoleVisibility: ObservableObject {
+    @Published var isVisible = false
 }
 
 // MARK: - Navigation & Shell
@@ -179,13 +201,21 @@ struct ConsoleView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var status: AppStatus
     @ObservedObject var recorder: ShortcutRecorderCoordinator
+    @ObservedObject var visibility: ConsoleVisibility
     @State private var section: ConsoleSection
     @Namespace private var navNamespace
 
-    init(settings: AppSettings, status: AppStatus, recorder: ShortcutRecorderCoordinator, initialSection: ConsoleSection = .zoom) {
+    init(
+        settings: AppSettings,
+        status: AppStatus,
+        recorder: ShortcutRecorderCoordinator,
+        visibility: ConsoleVisibility,
+        initialSection: ConsoleSection = .zoom
+    ) {
         self.settings = settings
         self.status = status
         self.recorder = recorder
+        self.visibility = visibility
         _section = State(initialValue: initialSection)
     }
 
@@ -208,8 +238,8 @@ struct ConsoleView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         switch section {
-                        case .zoom: ZoomPage(settings: settings, recorder: recorder)
-                        case .cursor: CursorPage(settings: settings)
+                        case .zoom: ZoomPage(settings: settings, recorder: recorder, isVisible: visibility.isVisible)
+                        case .cursor: CursorPage(settings: settings, isVisible: visibility.isVisible)
                         case .general: GeneralPage(settings: settings, status: status)
                         }
                     }

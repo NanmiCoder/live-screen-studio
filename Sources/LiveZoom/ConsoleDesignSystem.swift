@@ -137,32 +137,23 @@ struct KeycapBadge: View {
     }
 }
 
-/// Isolated breathing dot indicator (perpetual micro-interaction, never triggers parent re-renders).
+/// Crisp status indicator dot with a soft ambient halo (static, so SwiftUI never ticks the main thread at 120 Hz).
 struct BreathingDot: View {
     let color: Color
     var animated: Bool = true
-    @State private var pulse = false
 
     var body: some View {
         ZStack {
             if animated {
                 Circle()
-                    .fill(color.opacity(0.32))
+                    .fill(color.opacity(0.22))
                     .frame(width: 12, height: 12)
-                    .scaleEffect(pulse ? 1.25 : 0.72)
-                    .opacity(pulse ? 0.0 : 0.9)
             }
             Circle()
                 .fill(color)
                 .frame(width: 7, height: 7)
         }
         .frame(width: 12, height: 12)
-        .onAppear {
-            guard animated else { return }
-            withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
-        }
     }
 }
 

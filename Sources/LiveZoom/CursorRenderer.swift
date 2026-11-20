@@ -24,7 +24,7 @@ final class CursorRenderer {
     /// time rather than frames: WindowServer hide IPC can take a couple of frames, especially at 60 Hz.
     var isRevealed: Bool {
         guard let visibleSince else { return false }
-        return CACurrentMediaTime() - visibleSince >= 0.08
+        return CACurrentMediaTime() - visibleSince >= 0.06
     }
     private var visibleSince: CFTimeInterval?
     private var revealLogged = false
@@ -61,16 +61,14 @@ final class CursorRenderer {
             revealLogged = true
             log("system cursor cannot be hidden here; showing it instead of ours")
         }
-        // Re-hide at once; only back off when it keeps failing (over the Dock).
-        guard !isRevealed || now - lastHideAttempt > 0.1 else { return }
+        // Let the first hide settle before retrying (avoiding rapid IPC spam on 120 Hz frames), and back off
+        // further when the cursor stays revealed (over the Dock). Never call Show inside enforceHidden: that
+        // undoes the hide we just requested and makes WindowServer fight every frame.
+        let retryInterval: CFTimeInterval = isRevealed ? 0.2 : 0.04
+        guard hideCount == 0 || now - lastHideAttempt >= retryInterval else { return }
         lastHideAttempt = now
-        // Balance our prior hide before hiding again so WindowServer's per-connection hide count never stacks up.
-        if hideCount > 0 {
-            for _ in 0..<hideCount { CGDisplayShowCursor(CGMainDisplayID()) }
-            hideCount = 0
-        }
         CGDisplayHideCursor(CGMainDisplayID())
-        hideCount = 1
+        hideCount += 1
     }
 
     /// Diagnostics: frames in which the system cursor was visible although it should have been hidden.
