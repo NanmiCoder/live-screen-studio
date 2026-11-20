@@ -13,7 +13,7 @@
       <img src="https://img.shields.io/github/v/release/NanmiCoder/live-screen-studio?style=flat-square&color=2563EB&label=Release" alt="Latest Release" />
     </a>
     <img src="https://img.shields.io/badge/macOS-14%2B-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+" />
-    <img src="https://img.shields.io/badge/Arch-Apple%20Silicon%20%7C%20Intel-0F172A?style=flat-square" alt="Apple Silicon & Intel" />
+    <img src="https://img.shields.io/badge/Arch-Apple%20Silicon%20%7C%20Intel-0F172A?style=flat-square&logo=apple&logoColor=white" alt="Apple Silicon & Intel" />
     <img src="https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6" />
     <img src="https://img.shields.io/badge/Notarized-Developer%20ID-16A34A?style=flat-square" alt="Developer ID Notarized" />
   </p>
@@ -26,6 +26,8 @@
     <a href="#快捷键与操作">快捷键与操作</a>
     &nbsp;·&nbsp;
     <a href="#安装与授权">安装与授权</a>
+    &nbsp;·&nbsp;
+    <a href="#工作原理">工作原理</a>
     &nbsp;·&nbsp;
     <a href="#从源码编译">从源码编译</a>
   </p>
@@ -50,7 +52,7 @@
 - **放大时画面依然是活的**：可以照常点击按钮、输入代码、滚动页面；光标保持在当前屏幕内，不会滑到副屏或误触程序坞。
 
 <p align="center">
-  <img src="./assets/readme/zoom-steps.jpg" width="100%" alt="真实截图三步：1× 原画面；单击中键放大并画线标注；移到边缘时镜头跟随，点击出现波纹" />
+  <img src="./assets/readme/zoom-proof.webp" width="100%" alt="真实截图：左边是 1× 原画面，蓝框标出镜头位置；右上是单击中键后的 2× 放大画面，带一笔红色标注；右下是光标移到边缘后镜头跟过去的画面，点击处有波纹" />
 </p>
 
 ---
@@ -106,6 +108,7 @@
 - **防误删保护**：如果不小心直接从安装包或「下载」文件夹运行，LiveZoom 启动时会自动弹窗提示一键移入「应用程序」文件夹并重启，之后清理下载目录不会丢失。
 - **签名与公证**：正式发布包均使用 Developer ID 签名并通过 Apple 公证（`.app` 与 `.dmg` 均已 staple），下载后可直接打开。
 
+> [!NOTE]
 > 历史版本 `v0.2.0` 为 ad-hoc 签名：首次打开如被拦截，可执行 `xattr -dr com.apple.quarantine /Applications/LiveZoom.app`，或在「系统设置 → 隐私与安全性」点击「仍要打开」。
 
 ### 首次运行授权
@@ -114,6 +117,20 @@
 
 1. **辅助功能**：用于识别中键/侧键触发、点击效果和画笔手势。
 2. **屏幕录制**：用于采集需要放大的屏幕画面。**授权后请退出并重新打开 LiveZoom 使其生效。**
+
+---
+
+## 工作原理
+
+<p align="center">
+  <img src="./assets/readme/how-it-works.svg" width="100%" alt="工作原理：真实桌面、放大画面、自绘光标与笔迹三层叠在同一块屏幕上，OBS 的 macOS 屏幕采集直接拿到叠好的画面" />
+</p>
+
+1. **采集**：使用 **ScreenCaptureKit** 高帧率采集光标所在显示器，自动排除 LiveZoom 自身及 OBS 窗口。
+2. **放大**：在该显示器上叠加一层鼠标穿透的全屏窗口，按镜头视口实时裁剪缩放采集画面；OBS「macOS 屏幕采集」直接采集即可，无需任何 OBS 插件或改动。
+3. **重画光标**：精准隐藏系统光标并在最上层重绘光标、点击波纹和标注笔迹，与放大后的坐标一一对应，点到的就是看到的。
+4. **跟随**：镜头以光标为不动点缓动缩放，静止平移按输出整像素对齐，保证高分屏代码文字清晰不闪烁。
+5. **高亮**：高亮快捷键借助系统 **Vision** OCR 识别光标附近的文本行范围并贴合渲染标注。
 
 ---
 
@@ -135,16 +152,6 @@ scripts/build-dmg.sh
 ```
 
 `build-app.sh` 默认使用本机的 Apple Development 证书签名，保持签名身份稳定，重新编译后辅助功能和屏幕录制授权不会失效；也可通过 `CODESIGN_IDENTITY` 指定证书、`ARCH=arm64` 或 `ARCH=x86_64` 指定架构（找不到证书时自动退回 ad-hoc 签名）。
-
----
-
-## 工作原理
-
-1. 使用 **ScreenCaptureKit** 高帧率采集光标所在显示器，自动排除 LiveZoom 自身及 OBS 窗口。
-2. 在该显示器上叠加一层鼠标穿透的全屏窗口，按镜头视口实时裁剪缩放采集画面；OBS「macOS 屏幕采集」直接采集即可，无需任何 OBS 插件或改动。
-3. 精准隐藏系统光标并在最上层重绘光标、点击波纹和标注笔迹，与放大后的坐标一一对应，点到的就是看到的。
-4. 镜头以光标为不动点缓动缩放，静止平移按输出整像素对齐，保证高分屏代码文字清晰不闪烁。
-5. 高亮快捷键借助系统 **Vision** OCR 识别光标附近的文本行范围并贴合渲染标注。
 
 ---
 
@@ -176,6 +183,8 @@ swift build
 .build/debug/LiveZoom --cursor-diagnose <输出目录>       # 单光标与帧率诊断
 ```
 
-- `Sources/ZoomCore`：镜头缩放、安全区跟随、限速与整像素对齐算法
-- `Sources/CursorKit`：8 种光标渲染、运动平滑、点击动效与笔迹标注算法
-- `Sources/LiveZoom`：App 本体（ScreenCaptureKit 采集、叠加窗口、事件监听、控制台、安装引导）
+| 目录 | 内容 |
+| --- | --- |
+| `Sources/ZoomCore` | 镜头缩放、安全区跟随、限速与整像素对齐算法 |
+| `Sources/CursorKit` | 8 种光标渲染、运动平滑、点击动效与笔迹标注算法 |
+| `Sources/LiveZoom` | App 本体（ScreenCaptureKit 采集、叠加窗口、事件监听、控制台、安装引导） |
