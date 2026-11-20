@@ -8,6 +8,7 @@ struct ZoomPage: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var settings: AppSettings
     @ObservedObject var recorder: ShortcutRecorderCoordinator
+    let isVisible: Bool
     @State private var conflictNotice: String?
     @State private var noticeTask: Task<Void, Never>?
 
@@ -107,7 +108,12 @@ struct ZoomPage: View {
 
                 LazyVGrid(columns: inkColumns, spacing: 10) {
                     ForEach(InkStyle.allCases, id: \.self) { style in
-                        InkTile(style: style, color: settings.inkColor.color, selected: settings.inkStyle == style) {
+                        InkTile(
+                            style: style,
+                            color: settings.inkColor.color,
+                            selected: settings.inkStyle == style,
+                            animate: isVisible && style == .dashed
+                        ) {
                             withAnimation(StudioSpring.snappy) { settings.inkStyle = style }
                         }
                     }
@@ -297,6 +303,7 @@ private extension HighlightKind {
 struct CursorPage: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var settings: AppSettings
+    let isVisible: Bool
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 4)
 
     var body: some View {
@@ -309,7 +316,7 @@ struct CursorPage: View {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack {
                     CursorPreview(style: settings.cursorStyle, size: settings.cursorSize, effect: settings.clickEffect,
-                                  color: settings.clickColor.color)
+                                  color: settings.clickColor.color, animate: isVisible)
                         .frame(height: 158)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(
@@ -669,13 +676,14 @@ private struct InkTile: View {
     let style: InkStyle
     let color: NSColor
     let selected: Bool
+    let animate: Bool
     let action: () -> Void
 
     var body: some View {
         let p = StudioPalette(scheme: scheme)
         Button(action: action) {
             VStack(spacing: 6) {
-                TimelineView(.animation(minimumInterval: nil, paused: style != .dashed)) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
                     Canvas { ctx, size in
                         ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.10, green: 0.115, blue: 0.145)))
                         draw(in: &ctx, size: size, time: timeline.date.timeIntervalSinceReferenceDate)
@@ -784,9 +792,10 @@ private struct CursorPreview: View {
     let size: Double
     let effect: ClickEffect
     let color: NSColor
+    let animate: Bool
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animate)) { timeline in
             Canvas { ctx, canvasSize in
                 let half = canvasSize.width / 2
                 ctx.fill(Path(CGRect(x: 0, y: 0, width: half, height: canvasSize.height)),
