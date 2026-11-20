@@ -140,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.strokeColor = settings.inkColor.color
         presenter.strokeWidth = settings.strokeWidth
         input.shortcuts = Dictionary(settings.shortcuts.map { ($0.value.combo, $0.key) }, uniquingKeysWith: { a, _ in a })
+        input.undoShortcut = settings.undoShortcut?.combo
 
         presenter.style = settings.cursorStyle
         presenter.sizeScale = settings.cursorSize

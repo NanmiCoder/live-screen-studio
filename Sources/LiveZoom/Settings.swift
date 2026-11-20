@@ -34,6 +34,14 @@ enum TriggerButton: Int, CaseIterable {
         case .forward: "侧键（前进）"
         }
     }
+
+    var shortTitle: String {
+        switch self {
+        case .middle: "中键"
+        case .back: "后退侧键"
+        case .forward: "前进侧键"
+        }
+    }
 }
 
 enum ClickColor: String, CaseIterable {
@@ -88,6 +96,9 @@ enum InkColor: String, CaseIterable {
 
 /// A recorded keyboard shortcut: the key code, the ⌘ ⌥ ⌃ ⇧ flags held with it, and how it reads (e.g. "⌥1").
 struct Shortcut: Codable, Equatable {
+    /// Default stroke-undo shortcut while zoomed in: `⌘Z` (`kVK_ANSI_Z = 6`).
+    static let defaultUndo = Shortcut(keyCode: 6, modifiers: CGEventFlags.maskCommand.rawValue, display: "⌘Z")
+
     var keyCode: Int64
     var modifiers: UInt64
     var display: String
@@ -121,6 +132,12 @@ final class AppSettings: ObservableObject {
             save((try? JSONEncoder().encode(stored)) ?? Data(), "shortcuts")
         }
     }
+    /// Undo-last-stroke shortcut while zoomed in and strokes exist; defaults to `⌘Z`.
+    @Published private(set) var undoShortcut: Shortcut? {
+        didSet {
+            save((try? JSONEncoder().encode(undoShortcut)) ?? Data(), "undoShortcut")
+        }
+    }
 
     // Cursor
     @Published var cursorStyle: CursorStyle { didSet { save(cursorStyle.rawValue, "cursorStyle") } }
@@ -144,9 +161,19 @@ final class AppSettings: ObservableObject {
         inkColor = InkColor(rawValue: d.string(forKey: "inkColor") ?? "") ?? .red
         strokeWidth = d.double(forKey: "strokeWidth") > 0 ? d.double(forKey: "strokeWidth") : 5
         let stored = d.data(forKey: "shortcuts").flatMap { try? JSONDecoder().decode([String: Shortcut].self, from: $0) } ?? [:]
-        shortcuts = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in
+        let loadedShortcuts = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in
             HighlightKind(rawValue: key).map { ($0, value) }
         })
+        shortcuts = loadedShortcuts
+        if let rawUndo = d.data(forKey: "undoShortcut"),
+           let decoded = try? JSONDecoder().decode(Shortcut?.self, from: rawUndo) {
+            undoShortcut = decoded
+        } else {
+            // Fresh install, upgrade from pre-undo versions, or corrupt stored data: default to ⌘Z unless
+            // a highlight shortcut already owns that combination.
+            let taken = loadedShortcuts.values.contains { $0.combo == Shortcut.defaultUndo.combo }
+            undoShortcut = taken ? nil : .defaultUndo
+        }
         cursorStyle = CursorStyle(rawValue: d.string(forKey: "cursorStyle") ?? "") ?? .classic
         cursorSize = d.double(forKey: "cursorSize") > 0 ? d.double(forKey: "cursorSize") : 1.2
         clickEffect = ClickEffect(rawValue: d.string(forKey: "clickEffect") ?? "") ?? .ripple
@@ -157,14 +184,42 @@ final class AppSettings: ObservableObject {
         customCursorAlways = d.object(forKey: "customCursorAlways") as? Bool ?? true
     }
 
-    /// Sets or clears one shortcut; a combination can only belong to one highlight.
-    func setShortcut(_ shortcut: Shortcut?, for kind: HighlightKind) {
+    /// Sets or clears one shortcut; a combination can only belong to one action. Returns the displaced action's title, if any.
+    @discardableResult
+    func setShortcut(_ shortcut: Shortcut?, for kind: HighlightKind) -> String? {
+        var displaced: String?
         var updated = shortcuts
         if let shortcut {
-            for (other, existing) in updated where existing.combo == shortcut.combo { updated[other] = nil }
+            for (other, existing) in updated where other != kind && existing.combo == shortcut.combo {
+                updated[other] = nil
+                displaced = other.title
+            }
+            if undoShortcut?.combo == shortcut.combo {
+                undoShortcut = nil
+                displaced = "画线撤销"
+            }
         }
         updated[kind] = shortcut
         shortcuts = updated
+        return displaced
+    }
+
+    /// Sets or clears the undo-stroke shortcut; clears any conflicting highlight shortcut and returns its title, if any.
+    @discardableResult
+    func setUndoShortcut(_ shortcut: Shortcut?) -> String? {
+        var displaced: String?
+        if let shortcut {
+            var updated = shortcuts
+            var changed = false
+            for (kind, existing) in updated where existing.combo == shortcut.combo {
+                updated[kind] = nil
+                displaced = kind.title
+                changed = true
+            }
+            if changed { shortcuts = updated }
+        }
+        undoShortcut = shortcut
+        return displaced
     }
 
     private func save(_ value: Any, _ key: String) {
