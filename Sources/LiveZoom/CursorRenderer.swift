@@ -17,12 +17,14 @@ final class CursorRenderer {
 
     /// Whether LiveZoom wants the system cursor hidden; see `enforceHidden()`.
     private(set) var isSystemCursorHidden = false
+    /// Active `CGDisplayHideCursor` count issued by this process, kept bounded at 1 and always balanced on show.
+    private var hideCount = 0
     /// True while the system cursor stays visible despite hiding it (the Dock takes over the cursor while the
     /// pointer is over it). The drawn cursor steps aside then, so there is never a second cursor. Measured in
-    /// time rather than frames: a hide takes a moment to show, and frames are only 8 ms apart at 120 Hz.
+    /// time rather than frames: WindowServer hide IPC can take a couple of frames, especially at 60 Hz.
     var isRevealed: Bool {
         guard let visibleSince else { return false }
-        return CACurrentMediaTime() - visibleSince >= 0.025
+        return CACurrentMediaTime() - visibleSince >= 0.08
     }
     private var visibleSince: CFTimeInterval?
     private var revealLogged = false
@@ -62,7 +64,13 @@ final class CursorRenderer {
         // Re-hide at once; only back off when it keeps failing (over the Dock).
         guard !isRevealed || now - lastHideAttempt > 0.1 else { return }
         lastHideAttempt = now
+        // Balance our prior hide before hiding again so WindowServer's per-connection hide count never stacks up.
+        if hideCount > 0 {
+            for _ in 0..<hideCount { CGDisplayShowCursor(CGMainDisplayID()) }
+            hideCount = 0
+        }
         CGDisplayHideCursor(CGMainDisplayID())
+        hideCount = 1
     }
 
     /// Diagnostics: frames in which the system cursor was visible although it should have been hidden.
@@ -78,11 +86,19 @@ final class CursorRenderer {
     }()
 
     func showSystemCursor() {
-        guard isSystemCursorHidden else { return }
+        guard isSystemCursorHidden || hideCount > 0 else { return }
         isSystemCursorHidden = false
         visibleSince = nil
-        // Hide calls are counted (extra shows clamp at zero), so show until it is visible again.
-        for _ in 0..<512 where !Self.cursorIsVisible() {
+        revealLogged = false
+        // Always balance our hide count even if `CGCursorIsVisible()` is currently true (e.g. while the Dock
+        // temporarily overrides visibility); otherwise WindowServer hides the real cursor once that override ends.
+        let shows = max(hideCount, 1)
+        for _ in 0..<shows {
+            CGDisplayShowCursor(CGMainDisplayID())
+        }
+        hideCount = 0
+        // Defense-in-depth if any hide still has not settled.
+        for _ in 0..<32 where !Self.cursorIsVisible() {
             CGDisplayShowCursor(CGMainDisplayID())
         }
     }

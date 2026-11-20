@@ -485,11 +485,17 @@ final class InputTap {
 
         case .leftMouseUp:
             let ended = state.withLock { s -> (gesture: DrawGesture, point: CGPoint?) in
-                defer {
-                    s.draw = .idle
-                    s.drawPointer = nil
+                let gesture = s.draw
+                let point = s.drawPointer?.location
+                s.draw = .idle
+                s.drawPointer = nil
+                // Set `penTip` atomically with clearing `draw` while still armed, so `drawingArmed = false`
+                // on the main thread cannot interleave and leave a stale `penTip` / enabled `drawTap`.
+                if case .drawing = gesture, s.drawingArmed {
+                    s.penTip = point
+                    s.penTipMoves = 0
                 }
-                return (s.draw, s.drawPointer?.location)
+                return (gesture, point)
             }
             defer { if !drawingArmed { updateDrawTap() } }
             switch ended.gesture {
@@ -498,12 +504,14 @@ final class InputTap {
             case .passthrough:
                 return passWithoutCommand(event)
             case .drawing:
-                // No warp here: the system cursor catches up on the next move (see `settleAfterStroke`).
-                state.withLock {
-                    $0.penTip = ended.point
-                    $0.penTipMoves = 0
+                // No warp here while armed: the system cursor catches up on the next move (see `settleAfterStroke`).
+                // If drawing was disarmed concurrently, settle immediately.
+                if !drawingArmed {
+                    if let point = ended.point { movePointer(to: point) }
+                    emit([.strokeEnded, .drawingPointer(nil)])
+                } else {
+                    emit(.strokeEnded)
                 }
-                emit(.strokeEnded)
                 return nil
             case .finishing:
                 // Drawing was turned off midway (zooming out), so the system cursor shows again: settle it now.

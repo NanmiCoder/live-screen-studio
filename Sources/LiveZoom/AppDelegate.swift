@@ -15,8 +15,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsObserver: AnyCancellable?
     private var demo: Demo?
     private var diagnosis: CursorDiagnosis?
+    private var started = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let args = CommandLine.arguments
+        let isDiagnosticMode = args.contains("--console-preview")
+            || args.contains("--cursor-diagnose")
+            || args.contains("--demo")
+            || args.contains("--demo-ink")
+        if !isDiagnosticMode {
+            AppInstaller.restoreLoginItemIfNeeded()
+            if AppInstaller.promptIfNeeded() { return }
+        }
+        started = true
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "LiveZoom")
         let menu = NSMenu()
@@ -67,7 +79,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.presenter.resetDisplays()
         }
 
-        let args = CommandLine.arguments
         // Shows only the console on one page, without taking over the cursor or the mouse (for screenshots).
         if let index = args.firstIndex(of: "--console-preview") {
             console.show(settings: settings, status: status, section: args.count > index + 1 ? args[index + 1] : nil)
@@ -110,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard started else { return }
         zoom.reset()
         presenter.shutdown()
     }

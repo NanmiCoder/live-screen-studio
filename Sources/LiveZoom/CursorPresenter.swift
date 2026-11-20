@@ -123,6 +123,7 @@ final class CursorPresenter: NSObject {
         guard zoomDriven else { return }
         zoomDriven = false
         zoomMapping = nil
+        drawingPointer = nil
         if shouldBeActive { startLink() } else { updateActivation() }
     }
 
