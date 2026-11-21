@@ -1,3 +1,4 @@
+import AppKit
 import CoreMedia
 import ScreenCaptureKit
 
@@ -111,8 +112,13 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         CMTime(seconds: 0.9 / Double(max(fps, 1)), preferredTimescale: 600_000)
     }
 
-    /// The display's refresh rate, 60 when unknown.
+    /// The display's maximum refresh rate (accurate on ProMotion 120 Hz displays), 60 when unknown.
+    @MainActor
     static func refreshRate(of displayID: CGDirectDisplayID) -> Int {
+        if let maxFPS = NSScreen.screens.first(where: { $0.displayID == displayID })?.maximumFramesPerSecond,
+           maxFPS > 0 {
+            return maxFPS
+        }
         let rate = CGDisplayCopyDisplayMode(displayID)?.refreshRate ?? 0
         return rate > 0 ? Int(rate.rounded()) : 60
     }
