@@ -90,21 +90,64 @@ final class CameraTests: XCTestCase {
         XCTAssertLessThan(maxAcceleration, 15)
     }
 
+    func testEdgePushHoldsViewportStillInsideAndGlides1To1AtEdge() {
+        var config = ZoomCamera.Config()
+        config.follow = .edge
+        let camera = ZoomCamera(display: display, config: config)
+        let start = CGPoint(x: 1152, y: 768)
+        camera.zoomIn(to: 1.75, cursor: start, now: 0)
+        var t = run(camera, cursor: start, from: 0, seconds: 0.6)
+        XCTAssertTrue(camera.isSettled)
+        let settled = camera.center
+
+        // Moving inside the 84% central region must not budge the camera at all (Apple ⌥⌘+ feel).
+        for offset in [CGPoint(x: 450, y: 0), CGPoint(x: -450, y: 280), CGPoint(x: 200, y: -280)] {
+            let inside = CGPoint(x: start.x + offset.x, y: start.y + offset.y)
+            t = run(camera, cursor: inside, from: t, seconds: 0.25)
+            XCTAssertEqual(camera.center.x, settled.x, accuracy: 0.001)
+            XCTAssertEqual(camera.center.y, settled.y, accuracy: 0.001)
+        }
+
+        // Pushing steadily past the 8% right edge rim must glide smoothly with zero teleport ratchet.
+        let rimX = camera.viewport.maxX - camera.viewport.width * FollowPreset.edge.margin
+        var lastCenter = camera.center
+        var steadySpeeds: [CGFloat] = []
+        let panStart = t
+        for i in 1...45 {
+            t += frame
+            let cursor = CGPoint(x: rimX + 300 * CGFloat(t - panStart), y: start.y)
+            camera.update(cursor: cursor, now: t, dt: frame)
+            let speed = hypot(camera.center.x - lastCenter.x, camera.center.y - lastCenter.y) * camera.zoom / CGFloat(frame)
+            if i >= 20 { steadySpeeds.append(speed) }
+            lastCenter = camera.center
+        }
+        let minSteady = steadySpeeds.min() ?? 0
+        let maxSteady = steadySpeeds.max() ?? 0
+        XCTAssertGreaterThan(minSteady, 450, "Steady edge push must maintain continuous glide")
+        XCTAssertLessThan(maxSteady - minSteady, 40, "Steady edge push must not surge/brake like a ratchet")
+
+        // Stopping the cursor must settle cleanly right at the 8% edge rim.
+        let stopCursor = CGPoint(x: rimX + 300 * CGFloat(t - panStart), y: start.y)
+        _ = run(camera, cursor: stopCursor, from: t, seconds: 1.0)
+        XCTAssertTrue(camera.isSettled)
+        XCTAssertEqual((camera.viewport.maxX - stopCursor.x) / camera.viewport.width, FollowPreset.edge.margin, accuracy: 0.01)
+    }
+
     func testProportionalFollowHasZeroDeadzoneAndSmoothVelocity() {
         var config = ZoomCamera.Config()
-        config.follow = .snappy
+        config.follow = .continuous
         let camera = ZoomCamera(display: display, config: config)
         let start = CGPoint(x: 1152, y: 768)
         camera.zoomIn(to: 1.75, cursor: start, now: 0)
         var t = run(camera, cursor: start, from: 0, seconds: 0.6)
         XCTAssertTrue(camera.isSettled)
 
-        // Move the cursor steadily at 350 pt/s for 1 second: camera must respond on frame 1 (no deadzone)
+        // Move the cursor steadily at 350 pt/s for 1.5 seconds: camera must respond on frame 1 (no deadzone)
         // and settle into smooth, non-ratcheting velocity with zero sudden drops to 0.
         var lastCenter = camera.center
         var steadySpeeds: [CGFloat] = []
         let panStart = t
-        for i in 1...60 {
+        for i in 1...90 {
             t += frame
             let cursor = CGPoint(x: start.x + 350 * CGFloat(t - panStart), y: start.y)
             camera.update(cursor: cursor, now: t, dt: frame)
@@ -112,7 +155,7 @@ final class CameraTests: XCTestCase {
             if i == 1 {
                 XCTAssertGreaterThan(speed, 0, "Proportional follow must respond immediately with zero deadzone")
             }
-            if i >= 25 { steadySpeeds.append(speed) }
+            if i >= 55 { steadySpeeds.append(speed) }
             lastCenter = camera.center
         }
         XCTAssertFalse(camera.isSettled)
