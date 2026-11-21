@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var demo: Demo?
     private var diagnosis: CursorDiagnosis?
     private var started = false
+    private var lastAppliedShortcuts: [HighlightKind: Shortcut]?
+    private var lastAppliedUndoShortcut: Shortcut??
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
@@ -28,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if AppInstaller.promptIfNeeded() { return }
         }
         started = true
+        setupMainMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "LiveZoom")
@@ -147,8 +150,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.inkStyle = settings.inkStyle
         presenter.strokeColor = settings.inkColor.color
         presenter.strokeWidth = settings.strokeWidth
-        input.shortcuts = Dictionary(settings.shortcuts.map { ($0.value.combo, $0.key) }, uniquingKeysWith: { a, _ in a })
-        input.undoShortcut = settings.undoShortcut?.combo
+        if lastAppliedShortcuts != settings.shortcuts {
+            lastAppliedShortcuts = settings.shortcuts
+            input.shortcuts = Dictionary(settings.shortcuts.map { ($0.value.combo, $0.key) }, uniquingKeysWith: { a, _ in a })
+        }
+        if lastAppliedUndoShortcut != settings.undoShortcut {
+            lastAppliedUndoShortcut = settings.undoShortcut
+            input.undoShortcut = settings.undoShortcut?.combo
+        }
 
         presenter.style = settings.cursorStyle
         presenter.sizeScale = settings.cursorSize
@@ -183,6 +192,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             timer.invalidate()
             self.permissionTimer = nil
         }
+    }
+
+    // MARK: - Main menu (enables standard ⌘Q / ⌘W / ⌘, shortcuts when console window is focused)
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "LiveZoom")
+        appMenu.addItem(item("打开控制台…", #selector(openConsole), key: ","))
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 LiveZoom", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
+        appMenu.addItem(item("退出 LiveZoom", #selector(quit), key: "q"))
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     // MARK: - Menu

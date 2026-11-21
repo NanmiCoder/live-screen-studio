@@ -101,14 +101,22 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     /// Refreshes the permission status only while the console is open and visible.
     private var statusTimer: Timer?
+    private var statusTickCount = 0
     private weak var status: AppStatus?
+    private weak var settings: AppSettings?
     private let recorderCoordinator = ShortcutRecorderCoordinator()
     private let visibility = ConsoleVisibility()
 
     var windowNumber: Int? { window?.windowNumber }
 
     func show(settings: AppSettings, status: AppStatus, section: String? = nil) {
+        self.settings = settings
+        self.status = status
         status.refresh()
+        // Pre-render custom cursor thumbnails off the main thread before the user clicks "光标与动效".
+        Task { @MainActor in
+            CursorThumbnail.warmUpIfNeeded(previewStyle: settings.cursorStyle, previewSize: settings.cursorSize)
+        }
         if window == nil {
             let initial = section.flatMap(ConsoleSection.init(rawValue:)) ?? .zoom
             let controller = NSHostingController(
@@ -133,14 +141,18 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
             window.delegate = self
             self.window = window
         }
-        self.status = status
         visibility.isVisible = true
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
         if statusTimer == nil {
+            statusTickCount = 0
             let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-                guard let self, let window = self.window, window.occlusionState.contains(.visible) else { return }
-                self.status?.refresh()
+                guard let self, let window = self.window, window.occlusionState.contains(.visible),
+                      let status = self.status else { return }
+                self.statusTickCount += 1
+                // Poll every 1s while awaiting permissions; once ready, back off to every 3s.
+                if status.isReady, self.statusTickCount % 3 != 0 { return }
+                status.refresh()
             }
             RunLoop.main.add(timer, forMode: .common)
             statusTimer = timer
@@ -150,6 +162,37 @@ final class ConsoleWindowController: NSObject, NSWindowDelegate {
     func windowDidChangeOcclusionState(_ notification: Notification) {
         guard let window else { return }
         visibility.isVisible = window.occlusionState.contains(.visible)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let settings else { return true }
+        if settings.hasPromptedCloseBehavior {
+            if settings.closeWindowBehavior == .quitApp {
+                NSApp.terminate(nil)
+                return false
+            }
+            return true
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "关闭控制台窗口"
+        alert.informativeText = "LiveZoom 默认会在顶部菜单栏保持运行，以便随时中键放大画面。你也可以选择关闭窗口时直接退出应用，或随时按 ⌘Q 退出。"
+        alert.addButton(withTitle: "在菜单栏后台运行")
+        alert.addButton(withTitle: "彻底退出")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "记住我的选择（可在「通用与权限」中修改）"
+        alert.suppressionButton?.state = .on
+        let response = alert.runModal()
+        let shouldQuit = response == .alertSecondButtonReturn
+        if alert.suppressionButton?.state == .on {
+            settings.closeWindowBehavior = shouldQuit ? .quitApp : .keepInMenuBar
+            settings.hasPromptedCloseBehavior = true
+        }
+        if shouldQuit {
+            NSApp.terminate(nil)
+            return false
+        }
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -200,7 +243,8 @@ struct ConsoleView: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var settings: AppSettings
     @ObservedObject var status: AppStatus
-    @ObservedObject var recorder: ShortcutRecorderCoordinator
+    /// Passed through without subscribing at the top level, so recording a shortcut never redraws the sidebar.
+    let recorder: ShortcutRecorderCoordinator
     @ObservedObject var visibility: ConsoleVisibility
     @State private var section: ConsoleSection
     @Namespace private var navNamespace
@@ -232,11 +276,11 @@ struct ConsoleView: View {
                 .frame(width: 1)
                 .ignoresSafeArea(.container, edges: .top)
 
-            // Keep detail scrollbars cleanly below the top window corner radius while filling the full background.
-            ZStack {
-                p.canvasBg.ignoresSafeArea(.container, edges: .top)
+            // Give ScrollView an opaque canvas background and reset scroll to top cleanly when switching tabs.
+            ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
+                        Color.clear.frame(height: 0).id("console-scroll-top")
                         switch section {
                         case .zoom: ZoomPage(settings: settings, recorder: recorder, isVisible: visibility.isVisible)
                         case .cursor: CursorPage(settings: settings, isVisible: visibility.isVisible)
@@ -249,15 +293,18 @@ struct ConsoleView: View {
                     .frame(maxWidth: 780, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(p.canvasBg.ignoresSafeArea(.container, edges: .top))
+                .onChange(of: section) { _, _ in
+                    recorder.cancel()
+                    proxy.scrollTo("console-scroll-top", anchor: .top)
+                }
             }
         }
         .tint(p.accent)
-        .onChange(of: section) { _, _ in recorder.cancel() }
         .onDisappear { recorder.cancel() }
     }
 
     private func sidebar(palette p: StudioPalette) -> some View {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
         let summary = status.summary(enabled: settings.enabled, triggerTitle: settings.trigger.shortTitle, palette: p)
         return VStack(alignment: .leading, spacing: 0) {
             // Brand header below macOS traffic lights.
@@ -268,7 +315,7 @@ struct ConsoleView: View {
                         .font(.system(size: 14.5, weight: .semibold))
                         .tracking(-0.3)
                         .foregroundStyle(p.inkPrimary)
-                    Text("v\(version)")
+                    Text("v\(AppBrandBadge.version)")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(p.inkMuted)
                 }
@@ -280,7 +327,7 @@ struct ConsoleView: View {
             // Live status pill (real button so clicks work reliably and support keyboard/VoiceOver).
             Button {
                 if summary.needsPermissions {
-                    withAnimation(StudioSpring.snappy) { section = .general }
+                    section = .general
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -305,12 +352,13 @@ struct ConsoleView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 18)
 
-            // Navigation items.
+            // Navigation items: animate only the pill highlight locally so detail pages swap instantaneously with
+            // zero 600 ms dual-page crossfade overhead.
             VStack(spacing: 4) {
                 ForEach(ConsoleSection.allCases) { item in
                     let active = section == item
                     Button {
-                        withAnimation(StudioSpring.snappy) { section = item }
+                        section = item
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: item.icon)
@@ -337,7 +385,6 @@ struct ConsoleView: View {
                                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                                             .strokeBorder(p.cardBorder, lineWidth: 1)
                                     )
-                                    .shadow(color: p.shadow, radius: 6, x: 0, y: 2)
                                     .matchedGeometryEffect(id: "nav-pill", in: navNamespace)
                             }
                         }
@@ -346,11 +393,12 @@ struct ConsoleView: View {
                     .buttonStyle(TactileButtonStyle())
                 }
             }
+            .animation(StudioSpring.snappy, value: section)
             .padding(.horizontal, 12)
 
             Spacer(minLength: 16)
 
-            // Bottom master enable dock.
+            // Bottom master enable dock + always-accessible Quit button (essential on Notch MacBooks).
             VStack(alignment: .leading, spacing: 8) {
                 Rectangle().fill(p.divider).frame(height: 1)
                 HStack(spacing: 8) {
@@ -370,18 +418,67 @@ struct ConsoleView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 6)
-                .padding(.bottom, 16)
+
+                SidebarQuitButton(palette: p)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
             }
         }
     }
 }
 
-private struct AppBrandBadge: View {
+private struct SidebarQuitButton: View {
+    let palette: StudioPalette
+    @State private var hovering = false
+
     var body: some View {
-        if let icon = NSApp.applicationIconImage, Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
+        Button {
+            NSApp.terminate(nil)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "power")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text("退出 LiveZoom")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer(minLength: 0)
+                Text("⌘Q")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(hovering ? Color.red.opacity(0.85) : palette.inkMuted)
+            }
+            .foregroundStyle(hovering ? Color.red : palette.inkSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                hovering ? Color.red.opacity(palette.isDark ? 0.14 : 0.08) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("彻底退出 LiveZoom 后台进程 (⌘Q)")
+    }
+}
+
+private struct AppBrandBadge: View {
+    static let version: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
+
+    /// Pre-scaled 34pt Retina bitmap cached once so SwiftUI never resizes the 1024px app icon on redraws.
+    private static let cachedIcon: NSImage? = {
+        guard Bundle.main.bundleURL.pathExtension.lowercased() == "app",
+              let icon = NSApp.applicationIconImage else { return nil }
+        let target = NSSize(width: 34, height: 34)
+        let rendered = NSImage(size: target)
+        rendered.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        icon.draw(in: NSRect(origin: .zero, size: target), from: .zero, operation: .sourceOver, fraction: 1)
+        rendered.unlockFocus()
+        return rendered
+    }()
+
+    var body: some View {
+        if let icon = Self.cachedIcon {
             Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
                 .frame(width: 34, height: 34)
         } else {
             ZStack {

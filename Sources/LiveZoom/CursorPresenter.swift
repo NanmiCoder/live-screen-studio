@@ -82,9 +82,14 @@ final class CursorPresenter: NSObject {
     private var zoomDriven = false
     private var zoomMapping: ZoomMapping?
     private var zoomSurfaceDisplay: CGDirectDisplayID?
+    private struct ArtKey: Hashable {
+        let style: CursorStyle
+        let halfPixels: Int
+    }
+
     /// Click positions in global AppKit coordinates.
     private var marks: [(position: CGPoint, start: CFTimeInterval)] = []
-    private var artCache: [String: CursorImage] = [:]
+    private var artCache: [ArtKey: CursorImage] = [:]
     private var lastFrameTime: CFTimeInterval = 0
     private var lastSeed: Int32?
     private var watchdog: Timer?
@@ -110,6 +115,8 @@ final class CursorPresenter: NSObject {
 
     /// Restores the system cursor, e.g. before quitting.
     func shutdown() {
+        watchdog?.invalidate()
+        watchdog = nil
         isEnabled = false
     }
 
@@ -384,11 +391,11 @@ final class CursorPresenter: NSObject {
             && (snapshot == nil || snapshot?.kind == .arrow || (snapshot?.kind == .pointingHand && style.replacesPointingHand))
         if replace {
             // Render at a bucketed pixel density so zoom transitions do not re-render every frame.
-            let pixels = (backingScale * scale * 2).rounded(.up) / 2
-            let key = "\(style.rawValue)@\(pixels)"
+            let halfPixels = max(Int((backingScale * scale * 2).rounded(.up)), 1)
+            let key = ArtKey(style: style, halfPixels: halfPixels)
             if let cached = artCache[key] { return cached }
             if artCache.count > 48 { artCache.removeAll() }
-            let art = CursorArt.render(style, scale: pixels)
+            let art = CursorArt.render(style, scale: CGFloat(halfPixels) / 2)
             artCache[key] = art
             return art
         }
@@ -419,7 +426,9 @@ final class CursorPresenter: NSObject {
             ?? NSScreen.main else { return }
         let link = screen.displayLink(target: self, selector: #selector(tick(_:)))
         let maxFPS = Float(max(screen.maximumFramesPerSecond, 60))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: maxFPS, maximum: maxFPS, preferred: maxFPS)
+        // When not actively zoomed, allow ProMotion to scale down toward 30 Hz when idle instead of forcing 120 Hz
+        // wakeups while scrolling other windows or the console.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: min(30, maxFPS), maximum: maxFPS, preferred: maxFPS)
         link.add(to: .main, forMode: .common)
         lastTimestamp = 0
         self.link = link
