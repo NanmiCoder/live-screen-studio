@@ -65,6 +65,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             input.keysArmed = available
             if available, !settings.shortcuts.isEmpty { TextFinder.warmUp() }
         }
+        let liveCursorLocation: () -> NSPoint = { [weak self] in
+            guard let self, let cg = self.input.freshPointerCG, let mainHeight = self.presenter.mainScreenHeight else {
+                return NSEvent.mouseLocation
+            }
+            return NSPoint(x: cg.x, y: mainHeight - cg.y)
+        }
+        zoom.cursorLocation = liveCursorLocation
+        presenter.cursorLocation = liveCursorLocation
         zoom.onCursorBounds = { [weak self] bounds in self?.input.cursorBounds = bounds }
         presenter.onStrokesChanged = { [weak self] any in self?.input.hasStrokes = any }
         applySettings()

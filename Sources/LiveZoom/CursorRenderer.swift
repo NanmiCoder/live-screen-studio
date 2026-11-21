@@ -15,6 +15,12 @@ final class CursorRenderer {
         let kind: Kind
     }
 
+    private struct CursorGeometry: Equatable {
+        let width: Int
+        let height: Int
+        let hotSpot: CGPoint
+    }
+
     /// Whether LiveZoom wants the system cursor hidden; see `enforceHidden()`.
     private(set) var isSystemCursorHidden = false
     /// Active `CGDisplayHideCursor` count issued by this process, kept bounded at 1 and always balanced on show.
@@ -33,12 +39,32 @@ final class CursorRenderer {
     private var fingerprint: Int?
     private let arrowFingerprint: Int?
     private let pointingHandFingerprint: Int?
+    private let arrowGeometry: CursorGeometry?
+    private let pointingHandGeometry: CursorGeometry?
+    /// O(1) lookup for already-seen WindowServer cursor seeds so hovering between arrow / I-beam / hand never
+    /// touches `NSCursor.currentSystem` or allocates a `CGContext` on the render thread.
+    private var seedCache: [Int32: Snapshot] = [:]
+    private let hashQueue = DispatchQueue(label: "com.relakkes.livezoom.cursor-hash", qos: .userInteractive)
+    private var hashGeneration = 0
 
     init() {
         Self.allowCursorControlInBackground()
-        arrowFingerprint = Self.largestImage(of: NSCursor.arrow).map { Self.fingerprint(of: $0, hotSpot: NSCursor.arrow.hotSpot) }
-        pointingHandFingerprint = Self.largestImage(of: NSCursor.pointingHand)
-            .map { Self.fingerprint(of: $0, hotSpot: NSCursor.pointingHand.hotSpot) }
+        if let arrowImage = Self.largestImage(of: NSCursor.arrow) {
+            let hs = NSCursor.arrow.hotSpot
+            arrowFingerprint = Self.fingerprint(of: arrowImage, hotSpot: hs)
+            arrowGeometry = CursorGeometry(width: arrowImage.width, height: arrowImage.height, hotSpot: hs)
+        } else {
+            arrowFingerprint = nil
+            arrowGeometry = nil
+        }
+        if let handImage = Self.largestImage(of: NSCursor.pointingHand) {
+            let hs = NSCursor.pointingHand.hotSpot
+            pointingHandFingerprint = Self.fingerprint(of: handImage, hotSpot: hs)
+            pointingHandGeometry = CursorGeometry(width: handImage.width, height: handImage.height, hotSpot: hs)
+        } else {
+            pointingHandFingerprint = nil
+            pointingHandGeometry = nil
+        }
     }
 
     func hideSystemCursor() {
@@ -117,15 +143,72 @@ final class CursorRenderer {
         return { fn() != 0 }
     }()
 
-    /// Re-reads the system cursor (arrow, I-beam, hand, …) and keeps the snapshot current.
-    func refresh() {
+    /// Re-reads the system cursor (arrow, I-beam, hand, …) without stalling the display-link render frame.
+    /// Known seeds resolve in O(1) from cache; unseen cursors whose geometry cannot match arrow/hand resolve
+    /// immediately; only ambiguous geometry hashes pixels on a background queue.
+    func refresh(seed: Int32? = nil, synchronous: Bool = false) {
+        if let seed, let cached = seedCache[seed] {
+            hashGeneration += 1
+            snapshot = cached
+            return
+        }
         let cursor = NSCursor.currentSystem ?? NSCursor.arrow
         guard let image = Self.largestImage(of: cursor) else { return }
-        let key = Self.fingerprint(of: image, hotSpot: cursor.hotSpot)
-        guard key != fingerprint else { return }
-        let kind: Kind = key == arrowFingerprint ? .arrow : key == pointingHandFingerprint ? .pointingHand : .other
-        snapshot = Snapshot(image: image, size: cursor.image.size, hotSpot: cursor.hotSpot, kind: kind)
-        fingerprint = key
+        let size = cursor.image.size
+        let hotSpot = cursor.hotSpot
+        let geometry = CursorGeometry(width: image.width, height: image.height, hotSpot: hotSpot)
+
+        let matchesArrow = geometry == arrowGeometry
+        let matchesHand = geometry == pointingHandGeometry
+        if !matchesArrow, !matchesHand {
+            // Fast path: geometry rules out arrow & pointingHand with zero pixel hashing.
+            hashGeneration += 1
+            let resolved = Snapshot(image: image, size: size, hotSpot: hotSpot, kind: .other)
+            snapshot = resolved
+            storeCache(resolved, for: seed)
+            return
+        }
+
+        if synchronous || snapshot == nil {
+            hashGeneration += 1
+            let key = Self.fingerprint(of: image, hotSpot: hotSpot)
+            let kind = classify(key)
+            let resolved = Snapshot(image: image, size: size, hotSpot: hotSpot, kind: kind)
+            snapshot = resolved
+            fingerprint = key
+            storeCache(resolved, for: seed)
+            return
+        }
+
+        // Provisional immediate update using geometry hint, then exact pixel-hash verification off the main thread.
+        let provisionalKind: Kind = matchesArrow ? .arrow : .pointingHand
+        snapshot = Snapshot(image: image, size: size, hotSpot: hotSpot, kind: provisionalKind)
+        hashGeneration += 1
+        let gen = hashGeneration
+        let arrowFP = arrowFingerprint
+        let handFP = pointingHandFingerprint
+        hashQueue.async { [weak self] in
+            let key = Self.fingerprint(of: image, hotSpot: hotSpot)
+            let kind: Kind = key == arrowFP ? .arrow : key == handFP ? .pointingHand : .other
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let resolved = Snapshot(image: image, size: size, hotSpot: hotSpot, kind: kind)
+                self.storeCache(resolved, for: seed)
+                guard self.hashGeneration == gen else { return }
+                self.snapshot = resolved
+                self.fingerprint = key
+            }
+        }
+    }
+
+    private func classify(_ key: Int) -> Kind {
+        key == arrowFingerprint ? .arrow : key == pointingHandFingerprint ? .pointingHand : .other
+    }
+
+    private func storeCache(_ snapshot: Snapshot, for seed: Int32?) {
+        guard let seed else { return }
+        if seedCache.count >= 32 { seedCache.removeAll(keepingCapacity: true) }
+        seedCache[seed] = snapshot
     }
 
     /// The largest representation stays sharp when the cursor is drawn zoomed in.

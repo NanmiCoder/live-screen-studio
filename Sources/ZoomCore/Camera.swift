@@ -32,10 +32,19 @@ public enum ViewportMath {
                 y: anchor.y + (display.height / 2 - screenPoint.y) / zoom)
     }
 
+    /// Continuous 1:1 proportional mapping across the display: at equilibrium `screenPoint(cursor) == cursor`,
+    /// so the cursor can reach every edge smoothly with zero deadzone and zero ratcheting.
+    public static func proportionalCenter(cursor: CGPoint, zoom: CGFloat, display: CGSize) -> CGPoint {
+        let half = size(display: display, zoom: zoom)
+        let minX = half.width / 2, maxX = display.width - half.width / 2
+        let minY = half.height / 2, maxY = display.height - half.height / 2
+        let tx = display.width > 0 ? min(max(cursor.x / display.width, 0), 1) : 0.5
+        let ty = display.height > 0 ? min(max(cursor.y / display.height, 0), 1) : 0.5
+        return CGPoint(x: minX + tx * (maxX - minX), y: minY + ty * (maxY - minY))
+    }
+
     /// `viewport` moved by less than one output pixel so that its origin falls on whole output pixels (at
-    /// `pixelsPerPoint`). Panning by whole output pixels at a constant zoom shows an exact, shifted copy of the
-    /// previous frame; at any other offset the magnified text is resampled differently every frame and shimmers.
-    /// Never moves past the display's far edge.
+    /// `pixelsPerPoint`). Applied when the camera is at rest so static magnified text is razor-sharp.
     public static func pixelAligned(_ viewport: CGRect, zoom: CGFloat, pixelsPerPoint: CGFloat, display: CGSize) -> CGRect {
         let step = 1 / (zoom * pixelsPerPoint)
         func align(_ value: CGFloat, max limit: CGFloat) -> CGFloat {
@@ -48,8 +57,7 @@ public enum ViewportMath {
     }
 
     /// Leaves `center` alone while `cursor` is inside the safe zone (`margin` from each edge). Once the cursor
-    /// crosses it, moves just far enough that the cursor sits `settleMargin` from that edge: deeper than `margin`,
-    /// so the camera makes one decisive move instead of creeping along with the cursor.
+    /// crosses it, shifts smoothly so the cursor sits `settleMargin` from that edge.
     public static func applySafeZone(center: CGPoint, cursor: CGPoint, zoom: CGFloat, display: CGSize, margin: CGFloat,
                                      settleMargin: CGFloat? = nil) -> CGPoint {
         let s = size(display: display, zoom: zoom)
@@ -63,22 +71,22 @@ public enum ViewportMath {
     }
 }
 
-/// Zoom camera for one display: eased zoom transitions plus speed-limited cursor following.
+/// Zoom camera for one display: eased zoom transitions plus critically damped silky cursor following.
 public final class ZoomCamera {
     public enum Phase: Equatable, Sendable {
         case idle, zoomingIn, zoomed, zoomingOut
     }
 
     public struct Config: Sendable {
-        public var follow: FollowPreset = .calm
-        public var zoomInDuration: Double = 0.55
-        public var zoomOutDuration: Double = 0.45
+        public var follow: FollowPreset = .standard
+        public var zoomInDuration: Double = 0.40
+        public var zoomOutDuration: Double = 0.34
         public var minZoom: CGFloat = 1.25
         public var maxZoom: CGFloat = 4
         /// Time constant of wheel zoom adjustments.
-        public var zoomAdjustTime: Double = 0.15
+        public var zoomAdjustTime: Double = 0.12
         /// Speed multiplier ceiling while the cursor is outside the visible viewport, so a fast
-        /// fling never leaves the cursor off screen for long. Inside the viewport the base speed applies.
+        /// fling never leaves the cursor off screen for long.
         public var catchUpLimit: CGFloat = 3
 
         public init() {}
@@ -124,6 +132,11 @@ public final class ZoomCamera {
 
     public var isActive: Bool { phase != .idle }
 
+    /// True when zoom and pan have both come completely to rest.
+    public var isSettled: Bool {
+        phase == .zoomed && zoom == targetZoom && velocity == .zero && center == targetCenter
+    }
+
     public var viewport: CGRect {
         ViewportMath.rect(center: center, zoom: zoom, display: display)
     }
@@ -141,7 +154,7 @@ public final class ZoomCamera {
         let z = clampZoom(level)
         let anchorScreen = screenPoint(for: cursor)
         let fixed = ViewportMath.anchoredCenter(anchor: cursor, screenPoint: anchorScreen, zoom: z, display: display)
-        let to = settledCenter(fixed, cursor: cursor, zoom: z)
+        let to = followTarget(from: fixed, cursor: cursor, zoom: z)
         begin(.zoomingIn, toZoom: z, toCenter: to, anchor: cursor, anchorScreen: anchorScreen,
               duration: config.zoomInDuration, now: now)
     }
@@ -175,7 +188,7 @@ public final class ZoomCamera {
         case .idle:
             return
         case .zoomingIn, .zoomingOut:
-            advanceTransition(now: now)
+            advanceTransition(cursor: cursor, now: now, dt: dt)
         case .zoomed:
             follow(cursor: cursor, dt: dt)
         }
@@ -194,8 +207,23 @@ public final class ZoomCamera {
         boost = 1
     }
 
-    private func advanceTransition(now: TimeInterval) {
-        guard let t = transition else { return }
+    private func advanceTransition(cursor: CGPoint, now: TimeInterval, dt: Double) {
+        guard var t = transition else { return }
+        // If the user starts moving the mouse during zoom-in, smoothly steer the destination center toward
+        // the live cursor so panning responds immediately instead of feeling locked out during the transition.
+        if phase == .zoomingIn, !followPaused {
+            let liveTarget = followTarget(from: t.toCenter, cursor: cursor, zoom: t.toZoom)
+            if hypot(liveTarget.x - t.toCenter.x, liveTarget.y - t.toCenter.y) > 0.01 {
+                let blend = CGFloat(1 - exp(-dt / max(config.follow.smoothTime, 0.06)))
+                t.toCenter = CGPoint(
+                    x: t.toCenter.x + (liveTarget.x - t.toCenter.x) * blend,
+                    y: t.toCenter.y + (liveTarget.y - t.toCenter.y) * blend
+                )
+                transition = t
+            }
+        }
+
+        let previous = center
         let progress = min(max((now - t.start) / t.duration, 0), 1)
         let e = CGFloat(Easing.easeInOutCubic(progress))
         // Interpolate in log space so the zoom speed looks constant.
@@ -211,7 +239,13 @@ public final class ZoomCamera {
         zoom = t.toZoom
         center = ViewportMath.clampCenter(t.toCenter, zoom: zoom, display: display)
         targetCenter = center
-        velocity = .zero
+        // Carry over actual end velocity into `.zoomed` so active motion hands off seamlessly without a stop.
+        if phase == .zoomingIn, dt > 0 {
+            let v = CGVector(dx: (center.x - previous.x) / CGFloat(dt), dy: (center.y - previous.y) / CGFloat(dt))
+            velocity = hypot(v.dx, v.dy) > 0.5 ? v : .zero
+        } else {
+            velocity = .zero
+        }
         boost = 1
         targetZoom = phase == .zoomingOut ? 1 : clampZoom(t.toZoom * pendingZoomFactor)
         pendingZoomFactor = 1
@@ -222,8 +256,6 @@ public final class ZoomCamera {
         if zoom != targetZoom {
             let k = CGFloat(1 - exp(-dt / config.zoomAdjustTime))
             let remaining = log(targetZoom) - log(zoom)
-            // Like the pan: keep the far edge of the screen moving at least about a point per frame and land
-            // exactly, instead of a long sub-pixel tail that makes text shimmer.
             let minStep = 1 / display.width
             let step = abs(remaining * k) >= minStep ? remaining * k : (remaining < 0 ? -1 : 1) * min(abs(remaining), minStep)
             let newZoom = abs(remaining - step) < 1e-9 ? targetZoom : exp(log(zoom) + step)
@@ -236,35 +268,27 @@ public final class ZoomCamera {
         }
         guard !followPaused else {
             targetCenter = center
+            velocity = .zero
             return
         }
-        targetCenter = settledCenter(targetCenter, cursor: cursor, zoom: zoom)
+        targetCenter = followTarget(from: targetCenter, cursor: cursor, zoom: zoom)
         let wantedBoost = catchUpBoost(cursor: cursor)
-        let boostTime = wantedBoost > boost ? 0.1 : 0.35
+        let boostTime = wantedBoost > boost ? 0.08 : 0.30
         boost += (wantedBoost - boost) * CGFloat(1 - exp(-dt / boostTime))
-        let previous = center
+
         center = SmoothDamp.step(current: center, target: targetCenter, velocity: &velocity,
                                  smoothTime: config.follow.smoothTime,
                                  maxSpeed: config.follow.maxVisualSpeed * boost / zoom, dt: dt)
-        // The spring's tail creeps by fractions of a pixel for a long time, which makes text shimmer.
-        // Move at least `minVisualSpeed` and land exactly on the target instead.
-        let remaining = hypot(targetCenter.x - previous.x, targetCenter.y - previous.y)
-        let minStep = Self.minVisualSpeed * CGFloat(dt) / zoom
-        if remaining > 0, hypot(center.x - previous.x, center.y - previous.y) < minStep {
-            if remaining <= minStep {
-                center = targetCenter
-                velocity = .zero
-            } else {
-                let k = minStep / remaining
-                center = CGPoint(x: previous.x + (targetCenter.x - previous.x) * k,
-                                 y: previous.y + (targetCenter.y - previous.y) * k)
-            }
-        }
         center = ViewportMath.clampCenter(center, zoom: zoom, display: display)
-    }
 
-    /// Screen points per second: one pixel per frame at 60 Hz.
-    private static let minVisualSpeed: CGFloat = 60
+        // Pure organic ease-out to rest: settle cleanly once motion is imperceptible (< 0.08 screen pt).
+        let remaining = hypot(targetCenter.x - center.x, targetCenter.y - center.y) * zoom
+        let visualSpeed = hypot(velocity.dx, velocity.dy) * zoom
+        if remaining < 0.08, visualSpeed < 1.5 {
+            center = targetCenter
+            velocity = .zero
+        }
+    }
 
     /// 1 while the cursor is visible; grows with its distance outside the viewport (in half-viewports).
     private func catchUpBoost(cursor: CGPoint) -> CGFloat {
@@ -275,10 +299,19 @@ public final class ZoomCamera {
         return min(1 + 2 * outside, config.catchUpLimit)
     }
 
-    private func settledCenter(_ center: CGPoint, cursor: CGPoint, zoom: CGFloat) -> CGPoint {
-        let safe = ViewportMath.applySafeZone(center: center, cursor: cursor, zoom: zoom, display: display,
-                                              margin: config.follow.margin, settleMargin: config.follow.settleMargin)
-        return ViewportMath.clampCenter(safe, zoom: zoom, display: display)
+    private func followTarget(from currentTarget: CGPoint, cursor: CGPoint, zoom: CGFloat) -> CGPoint {
+        switch config.follow.mode {
+        case .proportional:
+            return ViewportMath.clampCenter(
+                ViewportMath.proportionalCenter(cursor: cursor, zoom: zoom, display: display),
+                zoom: zoom,
+                display: display
+            )
+        case .safeZone:
+            let safe = ViewportMath.applySafeZone(center: currentTarget, cursor: cursor, zoom: zoom, display: display,
+                                                  margin: config.follow.margin, settleMargin: config.follow.settleMargin)
+            return ViewportMath.clampCenter(safe, zoom: zoom, display: display)
+        }
     }
 
     private func clampToDisplay(_ p: CGPoint) -> CGPoint {

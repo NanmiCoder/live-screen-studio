@@ -2,8 +2,9 @@ import AppKit
 import CursorKit
 import QuartzCore
 
-/// Transparent, click-through window above everything (including the zoom overlay) that draws the cursor
-/// and click marks for one display. OBS captures it like any other window.
+/// Unified, click-through overlay window for one display: renders the zoomed GPU surface, annotation strokes,
+/// click marks and cursor inside ONE `NSWindow` / `CAContext` so every layer commits atomically with zero tearing.
+/// OBS display capture picks it up like any other window.
 final class CursorCanvasWindow: NSWindow {
     struct Mark {
         /// Display-local, top-left origin.
@@ -12,6 +13,7 @@ final class CursorCanvasWindow: NSWindow {
         let color: NSColor
     }
 
+    private let zoomSurface: ZoomSurfaceRenderer
     private let cursorLayer = CALayer()
     private let marksLayer = CALayer()
     /// Annotation strokes in display-local content points (y down); `setStrokeTransform` maps them on screen.
@@ -21,6 +23,7 @@ final class CursorCanvasWindow: NSWindow {
 
     init(screen: NSScreen) {
         displayHeight = screen.frame.height
+        zoomSurface = ZoomSurfaceRenderer(screen: screen)
         super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
         level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         backgroundColor = .clear
@@ -40,9 +43,10 @@ final class CursorCanvasWindow: NSWindow {
         strokesLayer.anchorPoint = .zero
         strokesLayer.frame = view.bounds
         cursorLayer.contentsGravity = .resize
-        cursorLayer.minificationFilter = .trilinear
+        cursorLayer.minificationFilter = .linear
         cursorLayer.magnificationFilter = .linear
         cursorLayer.isHidden = true
+        root.addSublayer(zoomSurface.layer)
         root.addSublayer(strokesLayer)
         root.addSublayer(marksLayer)
         root.addSublayer(cursorLayer)
@@ -52,6 +56,22 @@ final class CursorCanvasWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+
+    /// Renders the zoomed surface inside this window's single `CATransaction`.
+    func renderZoom(surface: IOSurface?, sequence: Int, viewport: CGRect) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        zoomSurface.render(surface: surface, sequence: sequence, viewport: viewport)
+        CATransaction.commit()
+    }
+
+    /// Hides the zoomed surface and releases any retained IOSurface / MTLTexture.
+    func clearZoom() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        zoomSurface.clear()
+        CATransaction.commit()
+    }
 
     /// Content point p appears at (p - origin) * zoom on screen; layer space has y up.
     func setStrokeTransform(origin: CGPoint, zoom: CGFloat) {

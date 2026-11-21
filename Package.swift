@@ -10,7 +10,10 @@ let package = Package(
         .executableTarget(
             name: "LiveZoom",
             dependencies: ["ZoomCore", "CursorKit"],
-            linkerSettings: [.linkedFramework("ScreenCaptureKit")]
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("ScreenCaptureKit"),
+            ]
         ),
         .testTarget(name: "ZoomCoreTests", dependencies: ["ZoomCore"]),
         .testTarget(name: "CursorKitTests", dependencies: ["CursorKit"]),

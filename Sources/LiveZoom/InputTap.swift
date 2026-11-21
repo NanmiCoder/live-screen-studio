@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import CursorKit
+import QuartzCore
 import os
 
 /// Global mouse hooks, run on their own thread so a busy main thread never delays anyone's scrolling or clicks.
@@ -101,8 +102,24 @@ final class InputTap {
     var cursorBounds: CGRect? {
         get { state.withLock { $0.cursorBounds } }
         set {
-            state.withLock { $0.cursorBounds = newValue }
+            state.withLock {
+                $0.cursorBounds = newValue
+                if newValue == nil {
+                    $0.latestPointer = nil
+                    $0.latestPointerTime = 0
+                    $0.lastWarpTime = 0
+                }
+            }
             if let confineTap { CGEvent.tapEnable(tap: confineTap, enable: newValue != nil) }
+        }
+    }
+    /// Most recent raw CGEvent pointer coordinate (global CG, top-left origin) if updated within 50 ms.
+    /// Feeds the zoom display link directly from the high-priority input thread instead of polling WindowServer.
+    var freshPointerCG: CGPoint? {
+        let now = CACurrentMediaTime()
+        return state.withLock { s in
+            guard let p = s.latestPointer, now - s.latestPointerTime < 0.05 else { return nil }
+            return p
         }
     }
     /// The highlight shortcuts; they, undo, and Esc only act while armed (zoomed in).
@@ -165,6 +182,9 @@ final class InputTap {
         var penTipMoves = 0
         var swallowRightUp = false
         var cursorBounds: CGRect?
+        var latestPointer: CGPoint?
+        var latestPointerTime: CFTimeInterval = 0
+        var lastWarpTime: CFTimeInterval = 0
         var shortcuts: [KeyCombo: HighlightKind] = [:]
         var undoShortcut: KeyCombo?
         var keysArmed = false
@@ -422,6 +442,16 @@ final class InputTap {
 
         switch type {
         case .mouseMoved:
+            // Fast path during normal panning: one unfair-lock check instead of two recovery/settle calls per packet.
+            let needsHandling = state.withLock { s -> Bool in
+                if case .idle = s.draw, s.penTip == nil {
+                    s.latestPointer = location
+                    s.latestPointerTime = CACurrentMediaTime()
+                    return false
+                }
+                return true
+            }
+            guard needsHandling else { return pass }
             recoverDrawing()
             settleAfterStroke(type, event)
             return pass
@@ -620,17 +650,28 @@ final class InputTap {
         }
         // A hung app must not trap the cursor on one display.
         guard !MainThreadWatch.shared.isStalled else { return pass }
-        let confinement = state.withLock { s in
-            (bounds: s.cursorBounds, drawing: type == .leftMouseDragged && s.drawPointer != nil)
-        }
-        guard let bounds = confinement.bounds, !confinement.drawing else { return pass }
         let location = event.location
-        let inside = CGPoint(x: min(max(location.x, bounds.minX), bounds.maxX),
-                             y: min(max(location.y, bounds.minY), bounds.maxY))
-        guard inside != location else { return pass }
-        // The pointer has already moved past the edge; put it back.
-        movePointer(to: inside)
-        event.location = inside
+        let now = CACurrentMediaTime()
+        let confinement = state.withLock { s -> (bounds: CGRect?, drawing: Bool, shouldWarp: Bool, inside: CGPoint) in
+            let drawing = type == .leftMouseDragged && s.drawPointer != nil
+            guard let bounds = s.cursorBounds, !drawing else {
+                return (nil, drawing, false, location)
+            }
+            let inside = CGPoint(x: min(max(location.x, bounds.minX), bounds.maxX),
+                                 y: min(max(location.y, bounds.minY), bounds.maxY))
+            s.latestPointer = inside
+            s.latestPointerTime = now
+            guard inside != location else { return (bounds, false, false, inside) }
+            // Throttle synchronous WindowServer warps along clamped edges to at most every 4 ms while still
+            // rewriting `event.location` on every packet so high-polling mice never cause warp storms.
+            let shouldWarp = now - s.lastWarpTime >= 0.004
+            if shouldWarp { s.lastWarpTime = now }
+            return (bounds, false, shouldWarp, inside)
+        }
+        guard confinement.bounds != nil, !confinement.drawing else { return pass }
+        guard confinement.inside != location else { return pass }
+        if confinement.shouldWarp { movePointer(to: confinement.inside) }
+        event.location = confinement.inside
         return pass
     }
 

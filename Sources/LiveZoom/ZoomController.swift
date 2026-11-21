@@ -2,8 +2,9 @@ import AppKit
 import QuartzCore
 import ZoomCore
 
-/// Ties capture, overlay and camera together, driven by the zoomed screen's display link.
-/// The cursor is drawn by CursorPresenter, which this controller drives frame by frame while zoomed.
+/// Ties capture, camera and the unified GPU canvas together, driven by the zoomed screen's display link.
+/// Both the zoomed Metal surface and the cursor/ink layers live inside `CursorPresenter`'s single per-display
+/// `CursorCanvasWindow`, committing atomically in one `CATransaction` with zero tearing.
 final class ZoomController: NSObject {
     private enum State {
         case idle
@@ -51,10 +52,8 @@ final class ZoomController: NSObject {
 
     private let presenter: CursorPresenter
     private let capturer = ScreenCapturer()
-    private var overlays: [CGDirectDisplayID: OverlayWindow] = [:]
     private var state = State.idle
     private var screen: NSScreen?
-    private var overlay: OverlayWindow?
     private var camera: ZoomCamera?
     private var displayLink: CADisplayLink?
     private var lastTimestamp: CFTimeInterval = 0
@@ -88,7 +87,8 @@ final class ZoomController: NSObject {
             cancelStart()
         case .active:
             guard let camera, let screen else { return }
-            let now = CACurrentMediaTime()
+            // Stay in the same clock domain as `CADisplayLink.targetTimestamp` so frame 1 starts at progress == 0.
+            let now = lastTimestamp > 0 ? lastTimestamp : CACurrentMediaTime()
             let mouse = currentCursorLocation
             let local = Self.local(mouse, in: screen)
             if cursorBounds == nil, !NSMouseInRect(mouse, screen.frame, false) {
@@ -134,14 +134,13 @@ final class ZoomController: NSObject {
     /// Drops everything immediately, e.g. when displays change or the app quits.
     func reset() {
         stopDisplayLink()
-        for window in overlays.values { window.orderOut(nil) }
-        overlays.removeAll()
         isDrawingAvailable = false
         cursorBounds = nil
         isDrawing = false
+        presenter.clearZoom()
         presenter.clearStrokes(animated: false)
         presenter.endZoom()
-        overlay = nil
+        screen = nil
         camera = nil
         heldFrames = []
         state = .idle
@@ -157,8 +156,9 @@ final class ZoomController: NSObject {
         state = .starting
         self.screen = screen
         pendingFactor = factor
-        // Create the overlay before capture starts: ScreenCaptureKit only lists (and so only excludes) apps with windows.
-        _ = overlay(for: screen, displayID: displayID)
+        // Ensure the unified canvas window exists before capture starts: ScreenCaptureKit only lists (and so only
+        // excludes) apps with at least one NSWindow.
+        presenter.prepareCanvas(for: screen, displayID: displayID)
         idleStopWork?.cancel()
         let requested = CACurrentMediaTime()
         Task { @MainActor in
@@ -194,7 +194,8 @@ final class ZoomController: NSObject {
 
     @objc private func tick(_ link: CADisplayLink) {
         let now = link.targetTimestamp
-        let dt = min(max(now - lastTimestamp, 1.0 / 240), 1.0 / 20)
+        let rawDT = lastTimestamp > 0 ? now - lastTimestamp : max(link.targetTimestamp - link.timestamp, 1.0 / 120)
+        let dt = min(max(rawDT, 1.0 / 240), 1.0 / 20)
         lastTimestamp = now
         switch state {
         case .idle: stopDisplayLink()
@@ -220,19 +221,19 @@ final class ZoomController: NSObject {
         var config = ZoomCamera.Config()
         config.follow = followPreset
         config.minZoom = minZoom
+        let mouse = currentCursorLocation
         let camera = ZoomCamera(display: screen.frame.size, config: config)
-        camera.zoomIn(to: zoomLevel * pendingFactor, cursor: Self.local(currentCursorLocation, in: screen), now: now)
-        let overlay = overlay(for: screen, displayID: displayID)
+        camera.zoomIn(to: zoomLevel * pendingFactor, cursor: Self.local(mouse, in: screen), now: now)
         self.camera = camera
-        self.overlay = overlay
         heldFrames = []
-        // First frame at 1×: identical to the real screen, so the switch is invisible. Content and cursor
-        // are committed together so they never land on screen a frame apart.
+        let viewport = shownViewport(camera)
+        // First frame at 1×: identical to the real screen, so the switch is invisible. Zoom surface, ink and cursor
+        // share ONE window and ONE CATransaction so they never land on screen a frame apart.
         CATransaction.begin()
-        render()
-        overlay.orderFrontRegardless()
+        CATransaction.setDisableActions(true)
         presenter.beginZoom()
-        presenter.zoomFrame(now: now, dt: dt, mapping: mapping(for: camera, displayID: displayID))
+        renderZoom(on: screen, displayID: displayID, viewport: viewport)
+        presenter.zoomFrame(now: now, dt: dt, mouse: mouse, mapping: mapping(for: camera, viewport: viewport, displayID: displayID))
         CATransaction.commit()
         state = .active
         log(String(format: "zoom in after %.0f ms", waited * 1000))
@@ -240,6 +241,7 @@ final class ZoomController: NSObject {
 
     private func tickActive(now: CFTimeInterval, dt: Double) {
         guard let screen, let displayID = screen.displayID, let camera else { return reset() }
+        // Single cursor sample per frame: camera and cursor layer always observe the exact same pointer position.
         let mouse = currentCursorLocation
         // The input tap keeps the cursor on this display while zoomed in, but it can overshoot an edge for a
         // moment before being put back: treat that as the edge. Only if it stays elsewhere (no input tap, or
@@ -271,9 +273,11 @@ final class ZoomController: NSObject {
         if zoomedIn != (cursorBounds != nil) {
             cursorBounds = zoomedIn ? Self.cursorBounds(on: screen, displayID: displayID) : nil
         }
+        let viewport = shownViewport(camera)
         CATransaction.begin()
-        render()
-        presenter.zoomFrame(now: now, dt: dt, mapping: mapping(for: camera, displayID: displayID))
+        CATransaction.setDisableActions(true)
+        renderZoom(on: screen, displayID: displayID, viewport: viewport)
+        presenter.zoomFrame(now: now, dt: dt, mouse: mouse, mapping: mapping(for: camera, viewport: viewport, displayID: displayID))
         CATransaction.commit()
         onFrame?(camera, heldFrames.last?.sequence ?? 0)
         // Back at 1×: this frame matches the real screen; the overlay goes away on the next one.
@@ -283,12 +287,11 @@ final class ZoomController: NSObject {
     private func finish() {
         isDrawingAvailable = false
         cursorBounds = nil
-        overlay?.orderOut(nil)
-        // Let go of the last captured frame (about 57 MB on a 5K display).
-        overlay?.clear()
+        // Hide the zoomed GPU surface and release the last captured frame (about 57 MB on a 5K display).
+        presenter.clearZoom()
         stopDisplayLink()
         presenter.endZoom()
-        overlay = nil
+        screen = nil
         camera = nil
         heldFrames = []
         state = .idle
@@ -299,37 +302,32 @@ final class ZoomController: NSObject {
         }
     }
 
-    private func render() {
-        guard let camera, let overlay else { return }
+    private func renderZoom(on screen: NSScreen, displayID: CGDirectDisplayID, viewport: CGRect) {
         if let frame = capturer.latestFrame, frame.sequence != heldFrames.last?.sequence {
             heldFrames.append(frame)
             if heldFrames.count > 2 { heldFrames.removeFirst() }
         }
-        overlay.render(surface: heldFrames.last?.surface, viewport: shownViewport(camera))
+        let latest = heldFrames.last
+        presenter.renderZoom(on: screen, displayID: displayID, surface: latest?.surface,
+                             sequence: latest?.sequence ?? -1, viewport: viewport)
     }
 
-    /// The part of the display on screen. While the zoom holds still it is snapped to whole output pixels, so a
-    /// pan shifts the magnified picture as it is instead of resampling (and shimmering) its text every frame.
+    /// The part of the display on screen. Only snap to whole output pixels when the camera has come completely to
+    /// rest (`isSettled`): snapping during active panning quantizes diagonal motion into 30 Hz stair-stepping,
+    /// whereas sub-pixel Catmull-Rom bicubic rendering stays buttery smooth in motion and razor-sharp at rest.
     private func shownViewport(_ camera: ZoomCamera) -> CGRect {
-        guard camera.phase == .zoomed, camera.zoom == camera.targetZoom, let screen else { return camera.viewport }
+        guard camera.isSettled, let screen else { return camera.viewport }
         return ViewportMath.pixelAligned(camera.viewport, zoom: camera.zoom, pixelsPerPoint: screen.backingScaleFactor,
                                          display: camera.display)
     }
 
-    private func mapping(for camera: ZoomCamera, displayID: CGDirectDisplayID) -> CursorPresenter.ZoomMapping {
-        // The cursor and ink use the same (possibly snapped) viewport as the picture, so they stay on the content.
-        let origin = shownViewport(camera).origin
+    private func mapping(for camera: ZoomCamera, viewport: CGRect, displayID: CGDirectDisplayID) -> CursorPresenter.ZoomMapping {
+        // The cursor and ink use the exact same viewport as the Metal background, so they stay locked to content.
+        let origin = viewport.origin
         let zoom = camera.zoom
         return CursorPresenter.ZoomMapping(displayID: displayID,
                                            map: { CGPoint(x: ($0.x - origin.x) * zoom, y: ($0.y - origin.y) * zoom) },
                                            scale: zoom, origin: origin, holdsCursor: cursorBounds != nil)
-    }
-
-    private func overlay(for screen: NSScreen, displayID: CGDirectDisplayID) -> OverlayWindow {
-        if let existing = overlays[displayID] { return existing }
-        let window = OverlayWindow(screen: screen)
-        overlays[displayID] = window
-        return window
     }
 
     // MARK: - Capture rate
@@ -350,14 +348,17 @@ final class ZoomController: NSObject {
     private func startDisplayLink(on screen: NSScreen) {
         stopDisplayLink()
         let link = screen.displayLink(target: self, selector: #selector(tick(_:)))
+        let maxFPS = Float(max(screen.maximumFramesPerSecond, 60))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: maxFPS, maximum: maxFPS, preferred: maxFPS)
         link.add(to: .main, forMode: .common)
-        lastTimestamp = CACurrentMediaTime()
+        lastTimestamp = 0
         displayLink = link
     }
 
     private func stopDisplayLink() {
         displayLink?.invalidate()
         displayLink = nil
+        lastTimestamp = 0
     }
 
     // MARK: - Geometry
