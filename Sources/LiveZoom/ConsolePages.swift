@@ -7,13 +7,10 @@ import SwiftUI
 struct ZoomPage: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var settings: AppSettings
-    @ObservedObject var recorder: ShortcutRecorderCoordinator
+    let recorder: ShortcutRecorderCoordinator
     let isVisible: Bool
     @State private var conflictNotice: String?
     @State private var noticeTask: Task<Void, Never>?
-
-    private let inkColumns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 5)
-    private let highlightColumns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 2)
 
     var body: some View {
         let p = StudioPalette(scheme: scheme)
@@ -106,16 +103,18 @@ struct ZoomPage: View {
                     }
                 }
 
-                LazyVGrid(columns: inkColumns, spacing: 10) {
+                // Static single-row HStack for the 5 fixed ink styles (avoids LazyVGrid scroll layout churn).
+                HStack(spacing: 10) {
                     ForEach(InkStyle.allCases, id: \.self) { style in
                         InkTile(
                             style: style,
                             color: settings.inkColor.color,
                             selected: settings.inkStyle == style,
-                            animate: isVisible && style == .dashed
+                            animate: isVisible && style == .dashed && settings.inkStyle == .dashed
                         ) {
-                            withAnimation(StudioSpring.snappy) { settings.inkStyle = style }
+                            settings.inkStyle = style
                         }
+                        .frame(maxWidth: .infinity)
                     }
                 }
 
@@ -194,7 +193,7 @@ struct ZoomPage: View {
             }
         }
 
-        // Bento Row 3: Smart Text Highlight Shortcuts (2x2 Grid)
+        // Bento Row 3: Smart Text Highlight Shortcuts (Static 2x2 Grid — zero LazyVGrid scroll overhead)
         StudioCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
@@ -215,40 +214,53 @@ struct ZoomPage: View {
                     }
                 }
 
-                LazyVGrid(columns: highlightColumns, spacing: 10) {
-                    ForEach(HighlightKind.allCases, id: \.self) { kind in
-                        HStack(spacing: 8) {
-                            Image(systemName: kind.symbolName)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(p.inkSecondary)
-                                .frame(width: 20)
-                            Text(kind.shortTitle)
-                                .font(.system(size: 12.5, weight: .medium))
-                                .lineLimit(1)
-                                .foregroundStyle(p.inkPrimary)
-                            Spacer(minLength: 6)
-                            StudioShortcutRecorder(
-                                id: "highlight-\(kind.rawValue)",
-                                shortcut: settings.shortcuts[kind],
-                                placeholder: "点击录制",
-                                coordinator: recorder
-                            ) { captured in
-                                let displaced = settings.setShortcut(captured, for: kind)
-                                if let captured { showConflictIfNeeded(displaced, shortcut: captured) }
+                let kinds = HighlightKind.allCases
+                Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+                    ForEach(0..<((kinds.count + 1) / 2), id: \.self) { row in
+                        GridRow {
+                            ForEach(0..<2, id: \.self) { col in
+                                let index = row * 2 + col
+                                if index < kinds.count {
+                                    highlightShortcutCell(kinds[index], palette: p)
+                                }
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(p.wellBg, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .strokeBorder(p.cardBorder, lineWidth: 1)
-                        )
                     }
                 }
             }
         }
         .onDisappear { noticeTask?.cancel() }
+    }
+
+    private func highlightShortcutCell(_ kind: HighlightKind, palette p: StudioPalette) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: kind.symbolName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(p.inkSecondary)
+                .frame(width: 20)
+            Text(kind.shortTitle)
+                .font(.system(size: 12.5, weight: .medium))
+                .lineLimit(1)
+                .foregroundStyle(p.inkPrimary)
+            Spacer(minLength: 6)
+            StudioShortcutRecorder(
+                id: "highlight-\(kind.rawValue)",
+                shortcut: settings.shortcuts[kind],
+                placeholder: "点击录制",
+                coordinator: recorder
+            ) { captured in
+                let displaced = settings.setShortcut(captured, for: kind)
+                if let captured { showConflictIfNeeded(displaced, shortcut: captured) }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(p.wellBg, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(p.cardBorder, lineWidth: 1)
+        )
     }
 
     private func cheatRow(_ keys: String, _ desc: String, palette p: StudioPalette) -> some View {
@@ -304,7 +316,6 @@ struct CursorPage: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var settings: AppSettings
     let isVisible: Bool
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 4)
 
     var body: some View {
         let p = StudioPalette(scheme: scheme)
@@ -353,12 +364,9 @@ struct CursorPage: View {
             VStack(alignment: .leading, spacing: 14) {
                 CardHeading(title: "光标样式与大小", icon: "cursorarrow")
 
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(CursorStyle.allCases, id: \.self) { style in
-                        StyleTile(style: style, selected: settings.cursorStyle == style) {
-                            withAnimation(StudioSpring.snappy) { settings.cursorStyle = style }
-                        }
-                    }
+                // Extracted static 2x4 Grid so dragging the size slider never re-evaluates the 8 tiles.
+                CursorStyleGrid(selectedStyle: settings.cursorStyle) { style in
+                    settings.cursorStyle = style
                 }
 
                 Rectangle().fill(p.divider).frame(height: 1)
@@ -367,7 +375,7 @@ struct CursorPage: View {
                     Text("大小")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(p.inkSecondary)
-                    Slider(value: $settings.cursorSize, in: 0.75...2.5)
+                    Slider(value: $settings.cursorSize, in: 0.75...2.5, step: 0.05)
                     Text(String(format: "%.2f×", settings.cursorSize))
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
@@ -468,6 +476,35 @@ struct CursorPage: View {
     }
 }
 
+private struct CursorStyleGrid: View, Equatable {
+    let selectedStyle: CursorStyle
+    let onSelect: (CursorStyle) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.selectedStyle == rhs.selectedStyle
+    }
+
+    var body: some View {
+        let styles = CursorStyle.allCases
+        Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+            ForEach(0..<((styles.count + 3) / 4), id: \.self) { row in
+                GridRow {
+                    ForEach(0..<4, id: \.self) { col in
+                        let index = row * 4 + col
+                        if index < styles.count {
+                            let style = styles[index]
+                            StyleTile(style: style, selected: selectedStyle == style) {
+                                onSelect(style)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Page 3: General & Permissions
 
 struct GeneralPage: View {
@@ -513,6 +550,31 @@ struct GeneralPage: View {
                     detail: "开机登录 macOS 后自动在菜单栏就绪",
                     isOn: Binding(get: { status.launchAtLogin }, set: { status.setLaunchAtLogin($0) })
                 )
+
+                Rectangle().fill(p.divider).frame(height: 1)
+
+                HStack(alignment: .center, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("关闭控制台窗口时")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(p.inkPrimary)
+                        Text("后台运行时可从顶部菜单栏图标重新打开或按 ⌘Q 退出")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(p.inkSecondary)
+                    }
+                    Spacer(minLength: 8)
+                    StudioSegmentedPicker(
+                        options: CloseWindowBehavior.allCases,
+                        selection: Binding(
+                            get: { settings.closeWindowBehavior },
+                            set: { newValue in
+                                settings.closeWindowBehavior = newValue
+                                settings.hasPromptedCloseBehavior = true
+                            }
+                        )
+                    ) { $0.title }
+                    .frame(width: 184)
+                }
 
                 if !AppInstaller.isInstalled {
                     Rectangle().fill(p.divider).frame(height: 1)
@@ -670,7 +732,8 @@ struct GeneralPage: View {
 
 // MARK: - Visual Tiles & Live Previews
 
-/// A wavy sample line in one stroke style, drawn like the real thing on a dark studio canvas.
+/// A wavy sample line in one stroke style, drawn on an opaque studio canvas. Only `.dashed` animates,
+/// and only while actively selected and visible, so idle CPU is strictly 0%.
 private struct InkTile: View {
     @Environment(\.colorScheme) private var scheme
     let style: InkStyle
@@ -683,10 +746,17 @@ private struct InkTile: View {
         let p = StudioPalette(scheme: scheme)
         Button(action: action) {
             VStack(spacing: 6) {
-                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
-                    Canvas { ctx, size in
-                        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.10, green: 0.115, blue: 0.145)))
-                        draw(in: &ctx, size: size, time: timeline.date.timeIntervalSinceReferenceDate)
+                Group {
+                    if style == .dashed {
+                        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
+                            Canvas(opaque: true) { ctx, size in
+                                draw(in: &ctx, size: size, time: animate ? timeline.date.timeIntervalSinceReferenceDate : 0)
+                            }
+                        }
+                    } else {
+                        Canvas(opaque: true) { ctx, size in
+                            draw(in: &ctx, size: size, time: 0)
+                        }
                     }
                 }
                 .frame(height: 54)
@@ -706,12 +776,29 @@ private struct InkTile: View {
     }
 
     private func draw(in ctx: inout GraphicsContext, size: CGSize, time: Double) {
-        let points = (0...40).map { i -> CGPoint in
-            let t = CGFloat(i) / 40
-            return CGPoint(x: 14 + t * (size.width - 28), y: size.height / 2 + sin(t * .pi * 2) * size.height * 0.2)
-        }
+        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.10, green: 0.115, blue: 0.145)))
+        let x0: CGFloat = 14
+        let span = max(size.width - 28, 1)
+        let midY = size.height / 2
+        let amp = size.height * 0.28
+
+        // Smooth 2-segment cubic Bézier S-wave (zero 41-point array allocations per frame).
         var path = Path()
-        path.addLines(points)
+        let start = CGPoint(x: x0, y: midY)
+        let mid = CGPoint(x: x0 + span * 0.5, y: midY)
+        let end = CGPoint(x: x0 + span, y: midY)
+        path.move(to: start)
+        path.addCurve(
+            to: mid,
+            control1: CGPoint(x: x0 + span * 0.17, y: midY + amp),
+            control2: CGPoint(x: x0 + span * 0.33, y: midY + amp)
+        )
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: x0 + span * 0.67, y: midY - amp),
+            control2: CGPoint(x: x0 + span * 0.83, y: midY - amp)
+        )
+
         let c = Color(nsColor: color)
         let w: CGFloat = 3
         func line(_ color: Color, _ width: CGFloat, cap: CGLineCap = .round, dash: [CGFloat] = [], phase: CGFloat = 0) {
@@ -730,9 +817,11 @@ private struct InkTile: View {
             line(c.opacity(0.38), w * 3.6, cap: .butt)
         case .arrow:
             line(c, w)
-            if let (a, b) = ArrowHead.barbs(for: points, length: 12), let tip = points.last {
+            // Tangent near the right endpoint of the second Bézier curve points upward-right.
+            let prev = CGPoint(x: x0 + span * 0.86, y: midY - amp * 0.72)
+            if let (a, b) = ArrowHead.barbs(for: [prev, end], length: 12) {
                 var head = Path()
-                head.addLines([a, tip, b])
+                head.addLines([a, end, b])
                 ctx.stroke(head, with: .color(c), style: SwiftUI.StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
             }
         case .dashed:
@@ -763,7 +852,7 @@ private struct StyleTile: View {
                                 endPoint: .bottom
                             )
                         )
-                    if let art = CursorThumbnail.art(for: style, scale: 3) {
+                    if let art = CursorThumbnail.art(for: style, scale: CursorThumbnail.tileScale) {
                         // Scale down spotlight slightly so its halo fits cleanly inside the 64pt tile without top clipping.
                         let previewMagnification: CGFloat = style == .spotlight ? 1.0 : 1.25
                         Image(decorative: art.image, scale: CGFloat(art.image.width) / art.size.width / previewMagnification)
@@ -786,7 +875,49 @@ private struct StyleTile: View {
     }
 }
 
-/// The selected style at its real size on light and dark backgrounds, with a looping click effect.
+/// Custom timeline schedule that ticks at 30 fps only while a click pulse is active (`[0, duration]`), emits
+/// one clear frame right after `duration`, and then sleeps through the remaining ~1.1 s idle gap until the
+/// next 1.6 s cycle — cutting preview wakeups by ~85% on low-end Macs.
+private struct PulseTimelineSchedule: TimelineSchedule {
+    let period: TimeInterval
+    let activeDuration: TimeInterval
+    let frameInterval: TimeInterval
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> Entries {
+        Entries(current: startDate, period: period, activeDuration: activeDuration, frameInterval: frameInterval)
+    }
+
+    struct Entries: Sequence, IteratorProtocol {
+        var current: Date
+        let period: TimeInterval
+        let activeDuration: TimeInterval
+        let frameInterval: TimeInterval
+
+        mutating func next() -> Date? {
+            let yieldDate = current
+            let ref = current.timeIntervalSinceReferenceDate
+            var phase = ref.truncatingRemainder(dividingBy: period)
+            if phase < 0 { phase += period }
+
+            if activeDuration <= 0 {
+                current = current.addingTimeInterval(period)
+            } else if phase < activeDuration {
+                let remaining = activeDuration - phase
+                // Ensure we always land just past `activeDuration` so the finished ripple clears cleanly.
+                let step = remaining < frameInterval ? remaining + 0.005 : frameInterval
+                current = current.addingTimeInterval(step)
+            } else {
+                // Sleep straight to the beginning of the next pulse cycle.
+                current = current.addingTimeInterval(Swift.max(period - phase, frameInterval))
+            }
+            return yieldDate
+        }
+    }
+}
+
+/// The selected style at its real size on light and dark backgrounds, split into:
+/// 1) Static background + static cursor images (zero redraws during idle or animation)
+/// 2) Lightweight click-pulse overlay mounted only when `effect != .none` and sleeping between pulses.
 private struct CursorPreview: View {
     let style: CursorStyle
     let size: Double
@@ -794,60 +925,127 @@ private struct CursorPreview: View {
     let color: NSColor
     let animate: Bool
 
+    private static let pulsePeriod: TimeInterval = 1.6
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animate)) { timeline in
-            Canvas { ctx, canvasSize in
-                let half = canvasSize.width / 2
-                ctx.fill(Path(CGRect(x: 0, y: 0, width: half, height: canvasSize.height)),
-                         with: .color(Color(red: 0.96, green: 0.965, blue: 0.975)))
-                ctx.fill(Path(CGRect(x: half, y: 0, width: half, height: canvasSize.height)),
-                         with: .color(Color(red: 0.10, green: 0.115, blue: 0.145)))
-                let age = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6)
-                let pixelScale = 2 * size
-                guard let art = CursorThumbnail.art(for: style, scale: pixelScale) else { return }
-                for x in [half / 2, half * 1.5] {
-                    let tip = CGPoint(x: x, y: canvasSize.height / 2 + 6)
-                    if let look = effect.appearance(age: age) {
+        let art = CursorThumbnail.art(for: style, scale: 2 * size)
+        ZStack {
+            // Static opaque split stage (never repainted on pulse ticks).
+            HStack(spacing: 0) {
+                Color(red: 0.96, green: 0.965, blue: 0.975)
+                Color(red: 0.10, green: 0.115, blue: 0.145)
+            }
+
+            // Dynamic click-effect ring layer (0 fps when effect == .none or console hidden/occluded).
+            if animate, effect != .none {
+                TimelineView(
+                    PulseTimelineSchedule(
+                        period: Self.pulsePeriod,
+                        activeDuration: effect.duration,
+                        frameInterval: 1.0 / 30
+                    )
+                ) { timeline in
+                    Canvas { ctx, canvasSize in
+                        let ref = timeline.date.timeIntervalSinceReferenceDate
+                        var age = ref.truncatingRemainder(dividingBy: Self.pulsePeriod)
+                        if age < 0 { age += Self.pulsePeriod }
+                        guard let look = effect.appearance(age: age) else { return }
+                        let half = canvasSize.width / 2
                         let r = look.radius * size
-                        let rect = CGRect(x: tip.x - r, y: tip.y - r, width: r * 2, height: r * 2)
                         let shading = GraphicsContext.Shading.color(Color(nsColor: color).opacity(look.opacity))
-                        if look.filled {
-                            ctx.fill(Path(ellipseIn: rect), with: shading)
-                        } else {
-                            ctx.stroke(Path(ellipseIn: rect), with: shading, lineWidth: look.lineWidth * size)
+                        for x in [half / 2, half * 1.5] {
+                            let tip = CGPoint(x: x, y: canvasSize.height / 2 + 6)
+                            let rect = CGRect(x: tip.x - r, y: tip.y - r, width: r * 2, height: r * 2)
+                            if look.filled {
+                                ctx.fill(Path(ellipseIn: rect), with: shading)
+                            } else {
+                                ctx.stroke(Path(ellipseIn: rect), with: shading, lineWidth: look.lineWidth * size)
+                            }
                         }
                     }
-                    let frame = CGRect(x: tip.x - art.hotSpot.x * size, y: tip.y - art.hotSpot.y * size,
-                                       width: art.size.width * size, height: art.size.height * size)
-                    ctx.draw(Image(decorative: art.image, scale: 1), in: frame)
+                }
+            }
+
+            // Static cursor images positioned on both halves (only re-rendered when style or size changes).
+            if let art {
+                let w = art.size.width * size
+                let h = art.size.height * size
+                let dx = w / 2 - art.hotSpot.x * size
+                let dy = h / 2 - art.hotSpot.y * size + 6
+                HStack(spacing: 0) {
+                    ForEach(0..<2, id: \.self) { _ in
+                        Image(decorative: art.image, scale: 1)
+                            .resizable()
+                            .frame(width: w, height: h)
+                            .offset(x: dx, y: dy)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
             }
         }
     }
 }
 
+/// MainActor-isolated cursor thumbnail cache. Pre-warms pure-CoreGraphics custom cursor styles on a background
+/// task (never touching AppKit `NSCursor` off the main thread) so switching to "光标与动效" is instant even on
+/// older Intel / M1 Macs.
+@MainActor
 enum CursorThumbnail {
-    private static var cache: [String: CursorImage] = [:]
+    static let tileScale: Double = 2.5
 
-    /// Custom styles from CursorArt; `.system` shows the standard arrow. The scale is rounded so dragging the
-    /// size slider reuses a handful of images instead of rendering (and keeping) one per slider value.
+    private static var cache: [String: CursorImage] = [:]
+    private static var warmedUp = false
+
+    static func warmUpIfNeeded(previewStyle: CursorStyle, previewSize: Double) {
+        // Cache the system arrow once on the main thread (AppKit requires main-thread NSCursor access).
+        _ = art(for: .system, scale: tileScale)
+        guard !warmedUp else { return }
+        warmedUp = true
+
+        let previewScale = bucket(2 * previewSize)
+        var requests: [(CursorStyle, Double)] = CursorStyle.allCases
+            .filter { $0 != .system }
+            .map { ($0, tileScale) }
+        if previewStyle != .system, previewScale != tileScale {
+            requests.append((previewStyle, previewScale))
+        }
+
+        Task.detached(priority: .userInitiated) {
+            let rendered: [(String, CursorImage)] = requests.compactMap { style, scale in
+                guard let image = CursorArt.render(style, scale: scale) else { return nil }
+                return ("\(style.rawValue)@\(scale)", image)
+            }
+            await MainActor.run {
+                for (key, image) in rendered where cache[key] == nil {
+                    cache[key] = image
+                }
+            }
+        }
+    }
+
     static func art(for style: CursorStyle, scale: Double) -> CursorImage? {
-        let scale = max((scale * 4).rounded() / 4, 0.25)
-        let key = "\(style.rawValue)@\(scale)"
-        if let cached = cache[key] { return cached }
-        if cache.count > 64 { cache.removeAll() }
-        let art: CursorImage?
         if style == .system {
+            if let cached = cache["system"] { return cached }
             let cursor = NSCursor.arrow
             let rep = cursor.image.representations.max { $0.pixelsWide < $1.pixelsWide }
             var rect = CGRect(x: 0, y: 0, width: rep?.pixelsWide ?? 0, height: rep?.pixelsHigh ?? 0)
-            art = rep?.cgImage(forProposedRect: &rect, context: nil, hints: nil).map {
+            let art = rep?.cgImage(forProposedRect: &rect, context: nil, hints: nil).map {
                 CursorImage(image: $0, size: cursor.image.size, hotSpot: cursor.hotSpot)
             }
-        } else {
-            art = CursorArt.render(style, scale: scale)
+            if let art { cache["system"] = art }
+            return art
         }
+
+        let bucketed = bucket(scale)
+        let key = "\(style.rawValue)@\(bucketed)"
+        if let cached = cache[key] { return cached }
+        if cache.count > 64 { cache.removeAll() }
+        let art = CursorArt.render(style, scale: bucketed)
         cache[key] = art
         return art
+    }
+
+    private nonisolated static func bucket(_ scale: Double) -> Double {
+        max((scale * 4).rounded() / 4, 0.25)
     }
 }

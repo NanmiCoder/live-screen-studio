@@ -57,14 +57,19 @@ struct StudioCard<Content: View>: View {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(p.cardBg, in: shape)
+            .background {
+                // Keep elevation on the background shape only (never on the full card subtree, which would
+                // force offscreen alpha-mask Gaussian shadows on every scroll pixel and Canvas redraw).
+                shape
+                    .fill(p.cardBg)
+                    .shadow(color: p.isDark ? .clear : p.shadow, radius: p.isDark ? 0 : 2, x: 0, y: 1)
+            }
             .overlay(
                 shape.strokeBorder(
                     LinearGradient(colors: [p.topRim, p.cardBorder], startPoint: .top, endPoint: .bottom),
                     lineWidth: 1
                 )
             )
-            .shadow(color: p.shadow, radius: 14, x: 0, y: 6)
     }
 }
 
@@ -171,7 +176,7 @@ struct StudioSegmentedPicker<Option: Hashable>: View {
             ForEach(options, id: \.self) { option in
                 let active = selection == option
                 Button {
-                    withAnimation(StudioSpring.snappy) { selection = option }
+                    selection = option
                 } label: {
                     Text(title(option))
                         .font(.system(size: 12, weight: active ? .semibold : .medium))
@@ -187,7 +192,6 @@ struct StudioSegmentedPicker<Option: Hashable>: View {
                                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                                             .strokeBorder(p.cardBorder, lineWidth: 1)
                                     )
-                                    .shadow(color: p.shadow, radius: 4, x: 0, y: 1)
                                     .matchedGeometryEffect(id: "seg-pill", in: ns)
                             }
                         }
@@ -196,6 +200,7 @@ struct StudioSegmentedPicker<Option: Hashable>: View {
                 .buttonStyle(.plain)
             }
         }
+        .animation(StudioSpring.snappy, value: selection)
         .padding(3)
         .background(p.wellBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(p.cardBorder, lineWidth: 1))

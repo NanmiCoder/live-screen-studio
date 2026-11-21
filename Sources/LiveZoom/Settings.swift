@@ -31,6 +31,17 @@ enum FollowStyle: String, CaseIterable {
     }
 }
 
+enum CloseWindowBehavior: String, CaseIterable {
+    case keepInMenuBar, quitApp
+
+    var title: String {
+        switch self {
+        case .keepInMenuBar: "后台运行"
+        case .quitApp: "彻底退出"
+        }
+    }
+}
+
 /// Mouse button numbers as reported by CGEvent.
 enum TriggerButton: Int, CaseIterable {
     case middle = 2, back = 3, forward = 4
@@ -158,6 +169,10 @@ final class AppSettings: ObservableObject {
     /// Draw the custom cursor all the time, not only while zoomed.
     @Published var customCursorAlways: Bool { didSet { save(customCursorAlways, "customCursorAlways") } }
 
+    // Window behavior
+    @Published var closeWindowBehavior: CloseWindowBehavior { didSet { save(closeWindowBehavior.rawValue, "closeWindowBehavior") } }
+    @Published var hasPromptedCloseBehavior: Bool { didSet { save(hasPromptedCloseBehavior, "hasPromptedCloseBehavior") } }
+
     private init() {
         let d = UserDefaults.standard
         enabled = d.object(forKey: "enabled") as? Bool ?? true
@@ -190,6 +205,8 @@ final class AppSettings: ObservableObject {
         hideIdleCursor = d.object(forKey: "hideIdleCursor") as? Bool ?? false
         idleDelay = d.double(forKey: "idleDelay") > 0 ? d.double(forKey: "idleDelay") : 3
         customCursorAlways = d.object(forKey: "customCursorAlways") as? Bool ?? true
+        closeWindowBehavior = CloseWindowBehavior(rawValue: d.string(forKey: "closeWindowBehavior") ?? "") ?? .keepInMenuBar
+        hasPromptedCloseBehavior = d.bool(forKey: "hasPromptedCloseBehavior")
     }
 
     /// Sets or clears one shortcut; a combination can only belong to one action. Returns the displaced action's title, if any.
