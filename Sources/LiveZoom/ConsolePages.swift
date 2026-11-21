@@ -54,7 +54,7 @@ struct ZoomPage: View {
                             .font(.system(size: 12.5, weight: .medium))
                             .foregroundStyle(p.inkSecondary)
                         StudioSegmentedPicker(options: FollowStyle.allCases, selection: $settings.followStyle) { $0.title }
-                        Text("「灵敏」「标准」随光标连续丝滑跟随；「平稳」保留中心静区，越界后平滑跟进。")
+                        Text(settings.followStyle.detail)
                             .font(.system(size: 11.5))
                             .foregroundStyle(p.inkMuted)
                     }

@@ -78,7 +78,7 @@ public final class ZoomCamera {
     }
 
     public struct Config: Sendable {
-        public var follow: FollowPreset = .standard
+        public var follow: FollowPreset = .edge
         public var zoomInDuration: Double = 0.40
         public var zoomOutDuration: Double = 0.34
         public var minZoom: CGFloat = 1.25

@@ -33,10 +33,11 @@ public struct FollowPreset: Equatable, Sendable {
         self.maxVisualSpeed = maxVisualSpeed
     }
 
-    /// Quiet central zone (40% of viewport) with zero staircase teleport jumps.
-    public static let calm = FollowPreset(mode: .safeZone, margin: 0.30, settleMargin: 0.30, smoothTime: 0.24, maxVisualSpeed: 2200)
-    /// Continuous proportional follow with creamy Screen Studio-like glide.
-    public static let standard = FollowPreset(mode: .proportional, margin: 0, settleMargin: 0, smoothTime: 0.15, maxVisualSpeed: 4000)
-    /// Continuous proportional follow tuned for tight, immediate 1:1 responsiveness.
-    public static let snappy = FollowPreset(mode: .proportional, margin: 0, settleMargin: 0, smoothTime: 0.085, maxVisualSpeed: 6000)
+    /// Apple macOS Accessibility Zoom (`⌥⌘+`) default style: 84% of the viewport stays completely rock-solid still
+    /// while moving the cursor inside; pushing past the 8% edge rim glides 1:1 smoothly with zero ratchet jump.
+    public static let edge = FollowPreset(mode: .safeZone, margin: 0.08, settleMargin: 0.08, smoothTime: 0.085, maxVisualSpeed: 2000)
+    /// Quiet central zone (44% of viewport) with gentle, motion-sickness-free speed for live walkthroughs.
+    public static let calm = FollowPreset(mode: .safeZone, margin: 0.28, settleMargin: 0.28, smoothTime: 0.22, maxVisualSpeed: 1500)
+    /// Continuous proportional follow (mirrors macOS "Continuously with pointer") with gentle damping and speed cap.
+    public static let continuous = FollowPreset(mode: .proportional, margin: 0, settleMargin: 0, smoothTime: 0.24, maxVisualSpeed: 1800)
 }

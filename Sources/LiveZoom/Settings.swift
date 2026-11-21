@@ -4,21 +4,29 @@ import CursorKit
 import ZoomCore
 
 enum FollowStyle: String, CaseIterable {
-    case calm, standard, snappy
+    case edge, calm, continuous
 
     var title: String {
         switch self {
-        case .calm: "平稳"
-        case .standard: "标准"
-        case .snappy: "灵敏"
+        case .edge: "边缘推屏"
+        case .calm: "平稳居中"
+        case .continuous: "持续跟随"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .edge: "类似 macOS 原生 ⌥⌘+：光标在画面内移动时镜头静止，推到边缘才 1:1 丝滑跟进。"
+        case .calm: "保留中心静区，越界后以柔和速度平稳跟进，直播讲解最不晕。"
+        case .continuous: "对标系统「随指针持续移动」：无死区按比例平缓跟随，且限速防抖。"
         }
     }
 
     var preset: FollowPreset {
         switch self {
+        case .edge: .edge
         case .calm: .calm
-        case .standard: .standard
-        case .snappy: .snappy
+        case .continuous: .continuous
         }
     }
 }
@@ -155,7 +163,7 @@ final class AppSettings: ObservableObject {
         enabled = d.object(forKey: "enabled") as? Bool ?? true
         defaultZoom = d.double(forKey: "defaultZoom") > 0 ? d.double(forKey: "defaultZoom") : 2
         trigger = TriggerButton(rawValue: d.integer(forKey: "triggerButton")) ?? .middle
-        followStyle = FollowStyle(rawValue: d.string(forKey: "followStyle") ?? "") ?? .calm
+        followStyle = FollowStyle(rawValue: d.string(forKey: "followStyle") ?? "") ?? .edge
         drawWhileZoomed = d.object(forKey: "drawWhileZoomed") as? Bool ?? true
         inkStyle = InkStyle(rawValue: d.string(forKey: "inkStyle") ?? "") ?? .marker
         inkColor = InkColor(rawValue: d.string(forKey: "inkColor") ?? "") ?? .red
