@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
@@ -28,16 +28,12 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
-    IDCompositionVisual,
+    IDCompositionVirtualSurface, IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
 };
-use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_WAS_STILL_DRAWING,
-    DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-};
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
@@ -121,11 +117,10 @@ struct GpuResources {
     d2d_factory: ID2D1Factory1,
     _d2d_device: ID2D1Device,
     d2d_ctx: ID2D1DeviceContext,
-    swap_chain: IDXGISwapChain1,
-    target_bitmap: ID2D1Bitmap1,
     dcomp_device: IDCompositionDevice,
     _dcomp_target: IDCompositionTarget,
-    annotation_visual: IDCompositionVisual,
+    annotation_surface: IDCompositionVirtualSurface,
+    annotation_size: (u32, u32),
     cursor_visual: IDCompositionVisual,
     cursor_surface: Option<CursorSurface>,
     round_stroke: ID2D1StrokeStyle1,
@@ -148,6 +143,7 @@ pub struct OverlayWindow {
 struct OverlayRenderer {
     gpu: GpuResources,
     last_annotations: Option<AnnotationFrameKey>,
+    last_annotation_bounds: Option<Rect>,
 }
 
 const DEVICE_RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -228,7 +224,7 @@ impl OverlayWindow {
         if self.position_window().is_err() {
             self.invalidate_renderer();
         } else if resize {
-            // A new monitor size needs a new backbuffer; position-only changes reuse it.
+            // A new monitor size needs a new annotation surface.
             self.renderer = None;
             self.retry_at = Instant::now();
         }
@@ -296,6 +292,7 @@ impl OverlayWindow {
                     self.renderer = Some(OverlayRenderer {
                         gpu,
                         last_annotations: None,
+                        last_annotation_bounds: None,
                     })
                 }
                 Err(_) => self.invalidate_renderer(),
@@ -353,15 +350,7 @@ impl OverlayRenderer {
         cursor: Option<&CursorDraw>,
     ) -> Result<(), windows::core::HRESULT> {
         let mut commit = self.update_cursor_visual(cursor)?;
-        if frame.annotations.is_empty() && frame.click_marks.is_empty() {
-            if self.last_annotations.take().is_some() {
-                self.gpu
-                    .annotation_visual
-                    .SetContent(None)
-                    .map_err(|e| e.code())?;
-                commit = true;
-            }
-        } else {
+        if !frame.annotations.is_empty() || !frame.click_marks.is_empty() {
             let animating = !frame.click_marks.is_empty()
                 || frame
                     .annotations
@@ -376,21 +365,11 @@ impl OverlayRenderer {
                 animating,
             };
             if animating || self.last_annotations.as_ref() != Some(&key) {
-                match self.draw_and_present(frame) {
-                    Ok(()) => {
-                        if self.last_annotations.is_none() {
-                            self.gpu
-                                .annotation_visual
-                                .SetContent(&self.gpu.swap_chain)
-                                .map_err(|e| e.code())?;
-                            commit = true;
-                        }
-                        self.last_annotations = Some(key);
-                    }
-                    Err(DXGI_ERROR_WAS_STILL_DRAWING) => {}
-                    Err(hr) => return Err(hr),
-                }
+                commit |= self.update_annotations(frame)?;
+                self.last_annotations = Some(key);
             }
+        } else if self.last_annotations.take().is_some() {
+            commit |= self.update_annotations(frame)?;
         }
         if commit {
             self.gpu.dcomp_device.Commit().map_err(|e| e.code())?;
@@ -544,52 +523,94 @@ impl OverlayRenderer {
         Ok(redraw || moved || attaching)
     }
 
-    unsafe fn draw_and_present(
+    unsafe fn update_annotations(
         &mut self,
         frame: &OverlayFrame<'_>,
-    ) -> Result<(), windows::core::HRESULT> {
-        self.gpu.d2d_ctx.SetTarget(&self.gpu.target_bitmap);
-        self.gpu.d2d_ctx.BeginDraw();
-        self.gpu.d2d_ctx.SetTransform(&Matrix3x2::identity());
-        self.gpu.d2d_ctx.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
+    ) -> Result<bool, windows::core::HRESULT> {
+        let current = annotation_frame_bounds(frame, self.gpu.annotation_size);
+        let dirty = [self.last_annotation_bounds, current]
+            .into_iter()
+            .flatten()
+            .reduce(Rect::union);
+        if let Some(dirty) = dirty {
+            let (width, height) = self.gpu.annotation_size;
+            self.draw_annotation_region(
+                frame,
+                RECT {
+                    left: dirty.min_x().floor() as i32,
+                    top: dirty.min_y().floor() as i32,
+                    right: (dirty.max_x().ceil() as i32).min(width as i32),
+                    bottom: (dirty.max_y().ceil() as i32).min(height as i32),
+                },
+            )?;
+        }
+        self.last_annotation_bounds = current;
+        Ok(dirty.is_some())
+    }
 
-        // 1. Annotations (in display-local content space, transformed by zoom camera).
-        if !frame.annotations.is_empty() {
-            let z = frame.zoom as f32;
-            let tx = -(frame.zoom_origin.x * frame.zoom) as f32;
-            let ty = -(frame.zoom_origin.y * frame.zoom) as f32;
-            let mat = Matrix3x2 {
-                M11: z,
-                M12: 0.0,
-                M21: 0.0,
-                M22: z,
-                M31: tx,
-                M32: ty,
-            };
-            self.gpu.d2d_ctx.SetTransform(&mat);
-            for item in frame.annotations {
-                self.draw_annotation(item, frame.now, frame.display_scale);
-            }
-            self.gpu.d2d_ctx.SetTransform(&Matrix3x2::identity());
+    unsafe fn draw_annotation_region(
+        &self,
+        frame: &OverlayFrame<'_>,
+        dirty: RECT,
+    ) -> Result<(), windows::core::HRESULT> {
+        let surface = &self.gpu.annotation_surface;
+        let mut offset = POINT::default();
+        let dxgi_surface: IDXGISurface = surface
+            .BeginDraw(Some(&dirty), &mut offset)
+            .map_err(|e| e.code())?;
+        let draw = create_target_bitmap(&self.gpu.d2d_ctx, &dxgi_surface)
+            .and_then(|bitmap| self.paint_annotations(frame, &bitmap, dirty, offset));
+        drop(dxgi_surface);
+        let end = surface.EndDraw();
+        draw.and(end).map_err(|e| e.code())
+    }
+
+    unsafe fn paint_annotations(
+        &self,
+        frame: &OverlayFrame<'_>,
+        bitmap: &ID2D1Bitmap1,
+        dirty: RECT,
+        offset: POINT,
+    ) -> windows::core::Result<()> {
+        // DirectComposition can return a portion of a shared texture at any offset.
+        let clip = D2D_RECT_F {
+            left: offset.x as f32,
+            top: offset.y as f32,
+            right: (offset.x + dirty.right - dirty.left) as f32,
+            bottom: (offset.y + dirty.bottom - dirty.top) as f32,
+        };
+        let mut screen = Matrix3x2::identity();
+        screen.M31 = (offset.x - dirty.left) as f32;
+        screen.M32 = (offset.y - dirty.top) as f32;
+        let ctx = &self.gpu.d2d_ctx;
+        ctx.SetTarget(bitmap);
+        ctx.BeginDraw();
+        ctx.SetTransform(&Matrix3x2::identity());
+        ctx.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        ctx.Clear(None);
+
+        // Annotations use the same snapped camera as the magnifier.
+        let mut content = screen;
+        content.M11 = frame.zoom as f32;
+        content.M22 = frame.zoom as f32;
+        content.M31 -= (frame.zoom_origin.x * frame.zoom) as f32;
+        content.M32 -= (frame.zoom_origin.y * frame.zoom) as f32;
+        ctx.SetTransform(&content);
+        for item in frame.annotations {
+            self.draw_annotation(item, frame.now, frame.display_scale);
         }
 
-        // 2. Click marks (screen space, scaled with DPI and zoom).
+        // Click marks remain in screen coordinates.
+        ctx.SetTransform(&screen);
         let click_scale = frame.display_scale * frame.zoom.sqrt();
         for mark in frame.click_marks {
             self.draw_click_mark(mark, click_scale);
         }
 
-        self.gpu.d2d_ctx.EndDraw(None, None).map_err(|e| e.code())?;
-        self.gpu
-            .swap_chain
-            .Present(0, DXGI_PRESENT_DO_NOT_WAIT)
-            .ok()
-            .map_err(|e| e.code())
+        ctx.PopAxisAlignedClip();
+        let result = ctx.EndDraw(None, None);
+        ctx.SetTarget(None);
+        result
     }
 
     unsafe fn make_brush(&self, c: ColorRgba) -> Option<ID2D1SolidColorBrush> {
@@ -1186,6 +1207,75 @@ impl Drop for OverlayWindow {
     }
 }
 
+fn annotation_frame_bounds(frame: &OverlayFrame<'_>, size: (u32, u32)) -> Option<Rect> {
+    let (width, height) = (size.0 as f64, size.1 as f64);
+    let clip_to_display = |bounds: Rect| {
+        let x = bounds.min_x().max(0.0);
+        let y = bounds.min_y().max(0.0);
+        let right = bounds.max_x().min(width);
+        let bottom = bounds.max_y().min(height);
+        (right > x && bottom > y).then(|| Rect::new(x, y, right - x, bottom - y))
+    };
+    let mut bounds = None;
+    for item in frame.annotations {
+        if item.is_spotlight() {
+            return Some(Rect::new(0.0, 0.0, width, height));
+        }
+        if let Some(content) = annotation_content_bounds(item, frame.display_scale) {
+            let projected = Rect::new(
+                (content.x - frame.zoom_origin.x) * frame.zoom,
+                (content.y - frame.zoom_origin.y) * frame.zoom,
+                content.width * frame.zoom,
+                content.height * frame.zoom,
+            );
+            // Include antialiasing and projection rounding in physical pixels.
+            if let Some(visible) = clip_to_display(projected.inset_by(-2.0, -2.0)) {
+                bounds = Some(bounds.map_or(visible, |prior: Rect| prior.union(visible)));
+            }
+        }
+    }
+    let click_scale = frame.display_scale * frame.zoom.sqrt();
+    for mark in frame.click_marks {
+        let radius = (mark.look.radius + mark.look.line_width * 0.5) * click_scale + 2.0;
+        let ripple = Rect::new(mark.center.x, mark.center.y, 0.0, 0.0).inset_by(-radius, -radius);
+        if let Some(visible) = clip_to_display(ripple) {
+            bounds = Some(bounds.map_or(visible, |prior| prior.union(visible)));
+        }
+    }
+    bounds
+}
+
+fn annotation_content_bounds(item: &AnnotationItem, dpi_scale: f64) -> Option<Rect> {
+    match item {
+        AnnotationItem::Stroke {
+            look, unit, points, ..
+        } => {
+            let point_bounds = |p: Point| Rect::new(p.x, p.y, 0.0, 0.0);
+            let path = points
+                .iter()
+                .copied()
+                .map(point_bounds)
+                .reduce(Rect::union)?;
+            // The smoothed path stays inside its points; an arrow adds two barbs.
+            let scale = dpi_scale * *unit;
+            let width = look.width * scale;
+            let padding = match look.style {
+                InkStyle::Neon | InkStyle::Highlighter => width * 1.8,
+                InkStyle::Arrow => (look.width * 3.2).max(14.0) * scale + width * 0.5,
+                InkStyle::Marker | InkStyle::Dashed => width * 0.5,
+            } + 0.01;
+            Some(path.inset_by(-padding, -padding))
+        }
+        AnnotationItem::Highlight {
+            line, look, unit, ..
+        } => {
+            // Cover the widest box, underline and fill, including the neon stroke.
+            let stroke = (look.width * 0.45).max(2.0) * dpi_scale * *unit * 1.8;
+            Some(line.inset_by(-line.height * 0.35 - stroke, -line.height * 0.18 - stroke))
+        }
+    }
+}
+
 fn is_annotation_animating(item: &AnnotationItem, now: f64) -> bool {
     match item {
         AnnotationItem::Stroke { look, .. } => look.style == InkStyle::Dashed,
@@ -1239,40 +1329,15 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
     }
     let d3d_device = d3d_device.ok_or("D3D11CreateDevice returned null")?;
     let dxgi_device: IDXGIDevice = d3d_device.cast().map_err(|e| e.to_string())?;
-    let dxgi_adapter = dxgi_device.GetAdapter().map_err(|e| e.to_string())?;
-    let dxgi_factory: IDXGIFactory2 = dxgi_adapter.GetParent().map_err(|e| e.to_string())?;
 
-    let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
-        Width: w_px,
-        Height: h_px,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
-    };
-    let swap_chain = dxgi_factory
-        .CreateSwapChainForComposition(&dxgi_device, &sc_desc, None)
-        .map_err(|e| format!("CreateSwapChainForComposition failed: {e}"))?;
-
-    let d2d_factory: ID2D1Factory1 =
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-            .map_err(|e| format!("D2D1CreateFactory failed: {e}"))?;
+    let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+        .map_err(|e| format!("D2D1CreateFactory failed: {e}"))?;
     let d2d_device = d2d_factory
         .CreateDevice(&dxgi_device)
         .map_err(|e| format!("CreateDevice(D2D) failed: {e}"))?;
     let d2d_ctx = d2d_device
         .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
         .map_err(|e| format!("CreateDeviceContext failed: {e}"))?;
-
-    let target_bitmap = bind_backbuffer(&d2d_ctx, &swap_chain)?;
 
     let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
         .map_err(|e| format!("DCompositionCreateDevice failed: {e}"))?;
@@ -1283,6 +1348,17 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
         .CreateVisual()
         .map_err(|e| format!("CreateVisual failed: {e}"))?;
     let annotation_visual = dcomp_device.CreateVisual().map_err(|e| e.to_string())?;
+    let annotation_surface = dcomp_device
+        .CreateVirtualSurface(
+            w_px,
+            h_px,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+        )
+        .map_err(|e| format!("CreateVirtualSurface(Annotations) failed: {e}"))?;
+    annotation_visual
+        .SetContent(&annotation_surface)
+        .map_err(|e| e.to_string())?;
     let cursor_visual = dcomp_device.CreateVisual().map_err(|e| e.to_string())?;
     dcomp_visual
         .AddVisual(&annotation_visual, true, None)
@@ -1329,11 +1405,10 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
         d2d_factory,
         _d2d_device: d2d_device,
         d2d_ctx,
-        swap_chain,
-        target_bitmap,
         dcomp_device,
         _dcomp_target: dcomp_target,
-        annotation_visual,
+        annotation_surface,
+        annotation_size: (w_px, h_px),
         cursor_visual,
         cursor_surface: None,
         round_stroke,
@@ -1345,17 +1420,6 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
 enum CursorFill {
     Solid(ColorRgba),
     Gradient(ColorRgba, ColorRgba),
-}
-
-unsafe fn bind_backbuffer(
-    d2d_ctx: &ID2D1DeviceContext,
-    swap_chain: &IDXGISwapChain1,
-) -> Result<ID2D1Bitmap1, String> {
-    let surface: IDXGISurface = swap_chain
-        .GetBuffer(0)
-        .map_err(|e| format!("SwapChain::GetBuffer failed: {e}"))?;
-    create_target_bitmap(d2d_ctx, &surface)
-        .map_err(|e| format!("CreateBitmapFromDxgiSurface failed: {e}"))
 }
 
 unsafe fn create_target_bitmap(
@@ -1457,4 +1521,58 @@ unsafe extern "system" fn overlay_wnd_proc(
         CHECK_DEVICE.set(true);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::annotation::InkLook;
+    use crate::core::geometry::Size;
+
+    #[test]
+    fn annotation_bounds_clip_projected_ink_and_include_a_full_spotlight() {
+        let look = InkLook {
+            style: InkStyle::Marker,
+            color: ColorRgba::new(1.0, 0.0, 0.0, 1.0),
+            width: 4.0,
+        };
+        let ink = [AnnotationItem::new_stroke(
+            Point::new(100.0, 110.0),
+            look,
+            2.0,
+            0.0,
+        )];
+        let mut frame = OverlayFrame {
+            now: 0.0,
+            display_scale: 1.0,
+            zoom_origin: Point::new(100.0, 100.0),
+            zoom: 2.0,
+            annotations_rev: 0,
+            annotations: &ink,
+            click_marks: &[],
+            cursor: None,
+            ensure_topmost: false,
+        };
+        let size = (4608, 3072);
+        let bounds = annotation_frame_bounds(&frame, size).unwrap();
+        assert_eq!(bounds.min_x(), 0.0);
+        assert!(bounds.contains(Point::new(4.0, 20.0)));
+        assert!(bounds.max_x() < 5.0);
+        frame.zoom_origin.x += 20.0;
+        assert_eq!(annotation_frame_bounds(&frame, size), None);
+
+        let spotlight = [AnnotationItem::new_highlight(
+            HighlightKind::Spotlight,
+            Rect::new(100.0, 110.0, 20.0, 10.0),
+            Size::new(4608.0, 3072.0),
+            look,
+            2.0,
+            0.0,
+        )];
+        frame.annotations = &spotlight;
+        assert_eq!(
+            annotation_frame_bounds(&frame, size),
+            Some(Rect::new(0.0, 0.0, 4608.0, 3072.0))
+        );
+    }
 }

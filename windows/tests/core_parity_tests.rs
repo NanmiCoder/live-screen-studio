@@ -342,6 +342,52 @@ fn native_clicks_and_drags_pass_through_while_annotations_exist() {
 }
 
 #[test]
+fn held_zoom_trigger_draws_without_keyboard_or_toggling_zoom_on_release() {
+    let start = Point::new(100.0, 100.0);
+    let end = Point::new(110.0, 120.0);
+    for button in [
+        TriggerButton::Middle,
+        TriggerButton::Back,
+        TriggerButton::Forward,
+    ] {
+        for release_trigger_first in [false, true] {
+            let mut fsm = InputFsm::default();
+            fsm.configure_trigger(true, button);
+            fsm.set_drawing_armed(true);
+            assert!(fsm.on_trigger_down(button, Modifiers::NONE).swallow);
+            assert!(fsm.on_left_down(start, Modifiers::NONE).swallow);
+            let movement = fsm.on_mouse_move(end, false);
+            assert!(!movement.swallow);
+            assert_eq!(
+                movement.actions,
+                vec![
+                    InputAction::StrokeBegan(start),
+                    InputAction::StrokeMoved {
+                        point: end,
+                        straight: false
+                    },
+                ]
+            );
+            let wheel = fsm.on_wheel(1.0, end);
+            assert!(wheel.swallow && wheel.actions.is_empty());
+            if release_trigger_first {
+                let release = fsm.on_trigger_up(button, end);
+                assert!(release.swallow && release.actions.is_empty());
+            }
+            let release = fsm.on_left_up();
+            assert!(release.swallow);
+            assert_eq!(release.actions, vec![InputAction::StrokeEnded]);
+            if !release_trigger_first {
+                let release = fsm.on_trigger_up(button, end);
+                assert!(release.swallow && release.actions.is_empty());
+            }
+            assert!(!fsm.on_left_down(start, Modifiers::NONE).swallow);
+            assert!(!fsm.on_left_up().swallow);
+        }
+    }
+}
+
+#[test]
 fn cancelled_drawing_keeps_its_release_and_never_freezes_motion() {
     let mut fsm = InputFsm::default();
     fsm.set_drawing_armed(true);

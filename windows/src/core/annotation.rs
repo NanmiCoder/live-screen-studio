@@ -211,17 +211,25 @@ impl AnnotationItem {
         )
     }
 
-    pub fn extend(&mut self, p: Point, straight: bool) {
-        if let Self::Stroke { unit, points, .. } = self {
-            if straight {
-                if let Some(&first) = points.first() {
-                    *points = vec![first, p];
-                }
-            } else if let Some(&last) = points.last() {
-                if p.distance_to(last) >= 0.75 * *unit {
-                    points.push(p);
-                }
+    pub fn extend(&mut self, p: Point, straight: bool) -> bool {
+        let Self::Stroke { unit, points, .. } = self else {
+            return false;
+        };
+        let Some(&last) = points.last() else {
+            return false;
+        };
+        if straight {
+            if points.len() == 2 && last == p {
+                return false;
             }
+            points.truncate(1);
+            points.push(p);
+            return true;
         }
+        if p.distance_to(last) < 0.75 * *unit {
+            return false;
+        }
+        points.push(p);
+        true
     }
 }

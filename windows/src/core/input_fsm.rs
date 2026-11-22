@@ -79,6 +79,7 @@ struct TriggerGesture {
     button: TriggerButton,
     cancelled: bool,
     adjusting: bool,
+    used_for_drawing: bool,
     wheel_accum: f64,
 }
 
@@ -201,6 +202,7 @@ impl InputFsm {
             button,
             cancelled: false,
             adjusting: false,
+            used_for_drawing: false,
             wheel_accum: 0.0,
         });
         HookOutcome::swallow()
@@ -215,7 +217,7 @@ impl InputFsm {
             return HookOutcome::pass();
         }
         let gesture = self.trigger_gesture.take().unwrap();
-        if gesture.adjusting || gesture.cancelled {
+        if gesture.adjusting || gesture.cancelled || gesture.used_for_drawing {
             HookOutcome::swallow()
         } else {
             HookOutcome::new(true, vec![InputAction::ToggleZoom(point)])
@@ -230,6 +232,9 @@ impl InputFsm {
         else {
             return HookOutcome::pass();
         };
+        if matches!(self.draw, DrawGesture::Pending(_) | DrawGesture::Drawing) {
+            return HookOutcome::swallow();
+        }
         gesture.wheel_accum += notches;
         if !gesture.adjusting && gesture.wheel_accum.abs() < 0.75 {
             return HookOutcome::swallow();
@@ -243,14 +248,20 @@ impl InputFsm {
         if !matches!(self.draw, DrawGesture::Idle) {
             return HookOutcome::swallow();
         }
+        let trigger_held = self
+            .trigger_gesture
+            .as_ref()
+            .is_some_and(|gesture| !gesture.cancelled);
         if self.accepts_new_input()
             && self.drawing_armed
-            && mods.ctrl
-            && mods.alt
+            && (trigger_held || (mods.ctrl && mods.alt))
             && self
                 .drawing_bounds
                 .is_none_or(|bounds| bounds.contains_pixel(point))
         {
+            if let Some(gesture) = self.trigger_gesture.as_mut() {
+                gesture.used_for_drawing = true;
+            }
             self.draw = DrawGesture::Pending(point);
             HookOutcome::swallow()
         } else {

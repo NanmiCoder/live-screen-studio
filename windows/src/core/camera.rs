@@ -153,7 +153,7 @@ pub struct CameraConfig {
 impl Default for CameraConfig {
     fn default() -> Self {
         Self {
-            follow: FollowPreset::EDGE,
+            follow: FollowPreset::CONTINUOUS,
             zoom_in_duration: 0.40,
             zoom_out_duration: 0.34,
             min_zoom: 1.25,
@@ -175,7 +175,7 @@ struct Transition {
     to_center: Point,
 }
 
-/// Zoom camera for one display: eased zoom transitions plus critically damped silky cursor following.
+/// Zoom camera for one display with eased zoom transitions and configurable cursor following.
 #[derive(Debug, Clone)]
 pub struct ZoomCamera {
     pub config: CameraConfig,
@@ -188,6 +188,7 @@ pub struct ZoomCamera {
     target_center: Point,
     velocity: Vector,
     transition: Option<Transition>,
+    last_update: Option<f64>,
     pending_zoom_factor: f64,
     boost: f64,
 }
@@ -206,6 +207,7 @@ impl ZoomCamera {
             target_center: center,
             velocity: Vector::ZERO,
             transition: None,
+            last_update: None,
             pending_zoom_factor: 1.0,
             boost: 1.0,
         }
@@ -214,7 +216,9 @@ impl ZoomCamera {
     pub fn set_follow_paused(&mut self, paused: bool) {
         self.follow_paused = paused;
         if paused {
+            self.target_center = self.center;
             self.velocity = Vector::ZERO;
+            self.boost = 1.0;
         }
     }
 
@@ -306,6 +310,9 @@ impl ZoomCamera {
     }
 
     pub fn adjust_zoom(&mut self, factor: f64) {
+        if self.follow_paused {
+            return;
+        }
         match self.phase {
             CameraPhase::Idle | CameraPhase::ZoomingOut => {}
             CameraPhase::ZoomingIn => {
@@ -321,6 +328,14 @@ impl ZoomCamera {
     }
 
     pub fn update(&mut self, cursor: Point, now: f64, dt: f64) {
+        let previous_update = self.last_update.replace(now);
+        if self.follow_paused {
+            // Keep animation progress at the last rendered pose throughout the stroke.
+            if let (Some(t), Some(previous)) = (&mut self.transition, previous_update) {
+                t.start += (now - previous.max(t.start)).max(0.0);
+            }
+            return;
+        }
         let cursor = self.clamp_to_display(cursor);
         match self.phase {
             CameraPhase::Idle => {}
@@ -335,6 +350,7 @@ impl ZoomCamera {
 
     /// Preserve the cursor hotspot when motion outruns smooth follow. Check the
     /// integer source origin and f32 scale the compositor actually receives.
+    /// Call only when the viewport may move.
     pub fn keep_cursor_visible(&mut self, cursor: Point) {
         let zoom = self.zoom as f32 as f64;
         let viewport = ViewportMath::rect(self.center, zoom, self.display);
@@ -384,6 +400,7 @@ impl ZoomCamera {
             anchor_screen,
             to_center,
         });
+        self.last_update = Some(now);
         self.phase = phase;
         self.target_zoom = to_zoom;
         self.pending_zoom_factor = 1.0;
@@ -395,7 +412,9 @@ impl ZoomCamera {
         let Some(mut t) = self.transition else {
             return;
         };
-        if self.phase == CameraPhase::ZoomingIn && !self.follow_paused {
+        let direct = self.config.follow.is_direct();
+        let proportional = direct && self.config.follow.mode == FollowMode::Proportional;
+        if self.phase == CameraPhase::ZoomingIn && !direct {
             let live_target = self.follow_target(t.to_center, cursor, t.to_zoom);
             if live_target.distance_to(t.to_center) > 0.01 {
                 let blend = 1.0 - (-dt / self.config.follow.smooth_time.max(0.06)).exp();
@@ -408,27 +427,60 @@ impl ZoomCamera {
         }
 
         let previous = self.center;
+        let previous_zoom = self.zoom;
         let progress = ((now - t.start) / t.duration).clamp(0.0, 1.0);
         let e = ease_in_out_cubic(progress);
-        self.zoom = (t.from_zoom.ln() + (t.to_zoom.ln() - t.from_zoom.ln()) * e).exp();
-        let fixed_now =
-            ViewportMath::anchored_center(t.anchor, t.anchor_screen, self.zoom, self.display);
-        let fixed_end =
-            ViewportMath::anchored_center(t.anchor, t.anchor_screen, t.to_zoom, self.display);
-        let blended = Point::new(
-            fixed_now.x + (t.to_center.x - fixed_end.x) * e,
-            fixed_now.y + (t.to_center.y - fixed_end.y) * e,
-        );
-        self.center = ViewportMath::clamp_center(blended, self.zoom, self.display);
+        self.zoom = if progress < 1.0 {
+            (t.from_zoom.ln() + (t.to_zoom.ln() - t.from_zoom.ln()) * e).exp()
+        } else {
+            t.to_zoom
+        };
+        self.center = if proportional {
+            let tracked = ViewportMath::proportional_center(cursor, self.zoom, self.display);
+            // Ease any initial offset away when an animation reverses between cursor samples.
+            let weight = (1.0 - e) / t.from_zoom;
+            let center = Point::new(
+                tracked.x + (t.anchor.x - t.anchor_screen.x) * weight,
+                tracked.y + (t.anchor.y - t.anchor_screen.y) * weight,
+            );
+            ViewportMath::clamp_center(center, self.zoom, self.display)
+        } else if direct && self.phase == CameraPhase::ZoomingIn {
+            // Rescale the last viewport around the anchor, retaining the rim pan already applied.
+            let anchor_screen =
+                ViewportMath::screen_point(t.anchor, previous, previous_zoom, self.display);
+            let center =
+                ViewportMath::anchored_center(t.anchor, anchor_screen, self.zoom, self.display);
+            self.follow_target(center, cursor, self.zoom)
+        } else {
+            let center = if progress < 1.0 {
+                let fixed_now = ViewportMath::anchored_center(
+                    t.anchor,
+                    t.anchor_screen,
+                    self.zoom,
+                    self.display,
+                );
+                let fixed_end = ViewportMath::anchored_center(
+                    t.anchor,
+                    t.anchor_screen,
+                    t.to_zoom,
+                    self.display,
+                );
+                Point::new(
+                    fixed_now.x + (t.to_center.x - fixed_end.x) * e,
+                    fixed_now.y + (t.to_center.y - fixed_end.y) * e,
+                )
+            } else {
+                t.to_center
+            };
+            ViewportMath::clamp_center(center, self.zoom, self.display)
+        };
 
         if progress < 1.0 {
             return;
         }
         self.transition = None;
-        self.zoom = t.to_zoom;
-        self.center = ViewportMath::clamp_center(t.to_center, self.zoom, self.display);
         self.target_center = self.center;
-        if self.phase == CameraPhase::ZoomingIn && dt > 0.0 {
+        if !direct && self.phase == CameraPhase::ZoomingIn && dt > 0.0 {
             let v = Vector::new(
                 (self.center.x - previous.x) / dt,
                 (self.center.y - previous.y) / dt,
@@ -478,7 +530,8 @@ impl ZoomCamera {
             self.zoom = new_zoom;
             self.center = ViewportMath::clamp_center(self.center, self.zoom, self.display);
         }
-        if self.follow_paused {
+        if self.config.follow.is_direct() {
+            self.center = self.follow_target(self.center, cursor, self.zoom);
             self.target_center = self.center;
             self.velocity = Vector::ZERO;
             return;

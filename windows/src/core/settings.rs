@@ -166,7 +166,7 @@ impl Default for AppSettings {
             enabled: true,
             default_zoom: 2.0,
             trigger: TriggerButton::Middle,
-            follow_style: FollowStyle::Edge,
+            follow_style: FollowStyle::Continuous,
             draw_while_zoomed: true,
             ink_style: InkStyle::Marker,
             ink_color: InkColor::Red,

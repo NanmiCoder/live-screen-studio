@@ -175,11 +175,11 @@
           </div>
         </div>
         <div class="row">
-          <div><div class="row-label">镜头跟随模式</div><div class="row-desc">边缘推屏在安全区内完全静止，看代码最不晕</div></div>
+          <div><div class="row-label">镜头跟随模式</div><div class="row-desc">即刻跟随适合连续移动。边缘推屏在中央保留静止区</div></div>
           <div class="seg" id="followSeg">
+            <button data-val="continuous">即刻跟随</button>
             <button data-val="edge">边缘推屏</button>
             <button data-val="calm">平稳居中</button>
-            <button data-val="continuous">持续跟随</button>
           </div>
         </div>
       </div>
@@ -187,7 +187,7 @@
       <div class="card">
         <div class="card-title">画线标注与文字高亮</div>
         <div class="row">
-          <div><div class="row-label">放大时使用标注手势</div><div class="row-desc">按住 Ctrl+Alt 并左键拖动，再按住 Shift 画直线</div></div>
+          <div><div class="row-label">放大时使用标注手势</div><div class="row-desc" id="drawHint">按住中键并左键拖动，再按住 Shift 画直线</div></div>
           <button id="toggleDraw" class="toggle on"></button>
         </div>
         <div class="row">
@@ -320,7 +320,7 @@
         <div class="row"><span>放大 / 缩回</span><span id="cheatTrigger"><span class="kbd">单击中键</span></span></div>
         <div class="row"><span>无标注时退出放大</span><span class="kbd">Esc</span></div>
         <div class="row"><span>实时调倍数</span><span id="cheatWheel"><span class="kbd">按住中键</span> + <span class="kbd">滚轮</span></span></div>
-        <div class="row"><span>画线 / 画直线</span><span><span class="kbd">Ctrl+Alt + 左键拖动</span> / 再按住 <span class="kbd">Shift</span></span></div>
+        <div class="row"><span>画线 / 画直线</span><span><span id="cheatDraw" class="kbd">按住中键 + 左键拖动</span> / 再按住 <span class="kbd">Shift</span></span></div>
         <div class="row"><span>撤销 / 清空标注</span><span id="cheatUndo"><span class="kbd">Ctrl+Z</span> / <span class="kbd">Esc</span></span></div>
       </div>
     </section>
@@ -509,6 +509,8 @@ function render() {
 
   const trig = TRIGGER_LABELS[state.trigger] || '中键';
   document.getElementById('powerHint').textContent = `单击${trig}放大`;
+  document.getElementById('drawHint').textContent = `按住${trig}并左键拖动，再按住 Shift 画直线`;
+  document.getElementById('cheatDraw').textContent = `按住${trig} + 左键拖动`;
   document.getElementById('cheatTrigger').innerHTML = `<span class="kbd">单击${trig}</span>`;
   document.getElementById('cheatWheel').innerHTML = `<span class="kbd">按住${trig}</span> + <span class="kbd">滚轮</span>`;
   const undoText = state.undoShortcut ? `<span class="kbd">${state.undoShortcut.display}</span> / <span class="kbd">Esc</span>` : `<span class="kbd">Esc</span>`;
