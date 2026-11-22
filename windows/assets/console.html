@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LiveZoom 控制台</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --sidebar: #141822;
+    --card: #1a1f2c;
+    --card-border: #262e40;
+    --ink: #f1f5f9;
+    --ink-muted: #94a3b8;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.16);
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--ink);
+    font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px; overflow: hidden;
+  }
+  .shell { display: flex; height: 100vh; }
+  .sidebar {
+    width: 210px; flex-shrink: 0; background: var(--sidebar);
+    border-right: 1px solid var(--card-border);
+    padding: 20px 14px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; }
+  .brand-dot {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, #2563eb, #38bdf8);
+    display: grid; place-items: center; font-weight: 700; font-size: 14px;
+  }
+  .brand-title { font-weight: 700; font-size: 15px; letter-spacing: 0.2px; }
+  .brand-sub { font-size: 11px; color: var(--ink-muted); }
+  .pill {
+    margin: 0 4px 12px; padding: 8px 10px; border-radius: 999px;
+    background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.28);
+    display: flex; align-items: center; gap: 8px; font-size: 12px; color: #6ee7b7;
+  }
+  .pill.paused {
+    background: rgba(148, 163, 184, 0.12); border-color: rgba(148, 163, 184, 0.25); color: var(--ink-muted);
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .nav-btn {
+    border: none; background: transparent; color: var(--ink-muted);
+    text-align: left; padding: 10px 12px; border-radius: 9px;
+    cursor: pointer; font-size: 13px; font-weight: 500; transition: all .15s;
+  }
+  .nav-btn:hover { background: rgba(255,255,255,0.04); color: var(--ink); }
+  .nav-btn.active { background: var(--accent-soft); color: #93c5fd; font-weight: 600; }
+  .spacer { flex: 1; }
+  .power-box {
+    padding: 12px; border-radius: var(--radius);
+    background: var(--card); border: 1px solid var(--card-border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .main {
+    flex: 1; min-width: 0; overflow-y: auto; padding: 24px 28px;
+  }
+  h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+  .subtitle { color: var(--ink-muted); margin: 0 0 18px; font-size: 12.5px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card-title { font-weight: 600; font-size: 13.5px; margin-bottom: 12px; color: #e2e8f0; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 9px 0; border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .row:first-of-type { border-top: none; padding-top: 2px; }
+  .row-label { font-weight: 500; }
+  .row-desc { font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
+  .seg { display: inline-flex; flex-wrap: wrap; background: #111520; padding: 3px; border-radius: 8px; gap: 3px; }
+  .seg button {
+    border: none; background: transparent; color: var(--ink-muted);
+    padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  }
+  .seg button.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .swatches { display: flex; gap: 8px; }
+  .swatch {
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: transform .12s;
+  }
+  .swatch.active { border-color: #fff; transform: scale(1.12); }
+  .cursor-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .cursor-card {
+    border: 1px solid var(--card-border); background: #131722;
+    border-radius: 10px; padding: 10px 8px; text-align: center; cursor: pointer;
+    transition: all .15s;
+  }
+  .cursor-card:hover { border-color: #475569; }
+  .cursor-card.active { border-color: var(--accent); background: var(--accent-soft); }
+  .cursor-card span { display: block; margin-top: 6px; font-size: 12px; }
+  .toggle {
+    width: 40px; height: 22px; border-radius: 999px; border: none; flex-shrink: 0;
+    background: #334155; position: relative; cursor: pointer; transition: background .15s;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle::after {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s;
+  }
+  .toggle.on::after { transform: translateX(18px); }
+  input[type=range] { accent-color: var(--accent); width: 130px; }
+  .range-wrap { display: flex; align-items: center; gap: 10px; }
+  .range-val { min-width: 44px; text-align: right; color: #93c5fd; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .shortcut-btn {
+    min-width: 104px; padding: 5px 10px; border-radius: 7px;
+    border: 1px solid var(--card-border); background: #111520; color: var(--ink);
+    cursor: pointer; font-size: 12px; font-weight: 600;
+  }
+  .shortcut-btn.recording { border-color: var(--amber); color: #fcd34d; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .kbd {
+    display: inline-block; padding: 2px 6px; border-radius: 5px;
+    background: #0b0e14; border: 1px solid #334155; font-size: 11px; color: #cbd5e1;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-dot">LZ</div>
+      <div>
+        <div class="brand-title">LiveZoom</div>
+        <div class="brand-sub">Windows 原生版</div>
+      </div>
+    </div>
+    <div id="statusPill" class="pill"><span class="dot"></span><span id="statusText">就绪 · 可随时放大</span></div>
+    <button class="nav-btn active" data-page="zoom">放大与标注</button>
+    <button class="nav-btn" data-page="cursor">光标与动效</button>
+    <button class="nav-btn" data-page="general">通用与状态</button>
+    <div class="spacer"></div>
+    <div class="power-box">
+      <div>
+        <div style="font-weight:600">启用放大</div>
+        <div id="powerHint" style="font-size:11px;color:var(--ink-muted)">单击中键放大</div>
+      </div>
+      <button id="toggleEnabled" class="toggle on"></button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- Page 1: Zoom & Annotation -->
+    <section id="page-zoom" class="page active">
+      <h2>放大与标注</h2>
+      <p class="subtitle">所见即所录：屏幕、录屏软件与会议共享实时同步放大与笔迹。</p>
+
+      <div class="card">
+        <div class="card-title">放大镜头</div>
+        <div class="row">
+          <div><div class="row-label">默认放大倍数</div><div class="row-desc">按住触发键滚轮可实时微调（1.25× – 4×）</div></div>
+          <div class="range-wrap">
+            <input id="defaultZoom" type="range" min="1.25" max="4" step="0.25" value="2" />
+            <span id="defaultZoomVal" class="range-val">2.0×</span>
+          </div>
+        </div>
+        <div class="row">
+          <div><div class="row-label">触发按键</div><div class="row-desc">按住 Alt + 触发键透传原本点击</div></div>
+          <div class="seg" id="triggerSeg">
+            <button data-val="middle">中键</button>
+            <button data-val="back">后退侧键</button>
+            <button data-val="forward">前进侧键</button>
+          </div>
+        </div>
+        <div class="row">
+          <div><div class="row-label">镜头跟随模式</div><div class="row-desc">边缘推屏在安全区内完全静止，看代码最不晕</div></div>
+          <div class="seg" id="followSeg">
+            <button data-val="edge">边缘推屏</button>
+            <button data-val="calm">平稳居中</button>
+            <button data-val="continuous">持续跟随</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">画线标注与文字高亮</div>
+        <div class="row">
+          <div><div class="row-label">放大时左键拖动直接画线</div><div class="row-desc">按住 Shift 画直线，Ctrl+拖动正常选中文字</div></div>
+          <button id="toggleDraw" class="toggle on"></button>
+        </div>
+        <div class="row">
+          <div class="row-label">笔触样式</div>
+          <div class="seg" id="inkStyleSeg">
+            <button data-val="marker">马克笔</button>
+            <button data-val="neon">霓虹</button>
+            <button data-val="highlighter">荧光笔</button>
+            <button data-val="arrow">箭头</button>
+            <button data-val="dashed">流动虚线</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-label">笔迹颜色</div>
+          <div class="swatches" id="inkColors"></div>
+        </div>
+        <div class="row">
+          <div class="row-label">笔迹粗细</div>
+          <div class="range-wrap">
+            <input id="strokeWidth" type="range" min="2" max="12" step="1" value="5" />
+            <span id="strokeWidthVal" class="range-val">5 px</span>
+          </div>
+        </div>
+        <div class="row">
+          <div><div class="row-label">撤销上一笔快捷键</div><div class="row-desc">放大且有标注时生效（右键也可撤销，Esc 清空；Backspace 清除绑定）</div></div>
+          <button class="shortcut-btn" data-shortcut="undo">Ctrl+Z</button>
+        </div>
+        <div class="row">
+          <div><div class="row-label">文字行高亮 · 框住这一行</div><div class="row-desc">点击按钮录制快捷键（支持中英文输入法），自动避免冲突</div></div>
+          <button class="shortcut-btn" data-shortcut="box">未设置</button>
+        </div>
+        <div class="row">
+          <div class="row-label">文字行高亮 · 下划线</div>
+          <button class="shortcut-btn" data-shortcut="underline">未设置</button>
+        </div>
+        <div class="row">
+          <div class="row-label">文字行高亮 · 荧光笔涂亮</div>
+          <button class="shortcut-btn" data-shortcut="fill">未设置</button>
+        </div>
+        <div class="row">
+          <div class="row-label">文字行高亮 · 聚光灯压暗</div>
+          <button class="shortcut-btn" data-shortcut="spotlight">未设置</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Page 2: Cursor -->
+    <section id="page-cursor" class="page">
+      <h2>光标与动效</h2>
+      <p class="subtitle">仅替换普通箭头（圆点兼替手型），文本输入等系统光标保持原样。</p>
+
+      <div class="card">
+        <div class="card-title">光标样式（8 种）</div>
+        <div class="cursor-grid" id="cursorGrid"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">大小与点击动效</div>
+        <div class="row">
+          <div class="row-label">光标大小</div>
+          <div class="range-wrap">
+            <input id="cursorSize" type="range" min="0.8" max="2.5" step="0.1" value="1.2" />
+            <span id="cursorSizeVal" class="range-val">1.2×</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-label">点击效果</div>
+          <div class="seg" id="clickEffectSeg">
+            <button data-val="none">无</button>
+            <button data-val="ripple">波纹</button>
+            <button data-val="halo">光圈</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-label">点击效果颜色</div>
+          <div class="swatches" id="clickColors"></div>
+        </div>
+        <div class="row">
+          <div><div class="row-label">平时也使用自定义光标</div><div class="row-desc">关闭后仅在放大期间显示自定义光标</div></div>
+          <button id="toggleAlwaysCursor" class="toggle on"></button>
+        </div>
+        <div class="row">
+          <div><div class="row-label">光标移动平滑</div><div class="row-desc">轻微阻尼滤除鼠标抖动</div></div>
+          <button id="toggleSmoothCursor" class="toggle"></button>
+        </div>
+        <div class="row">
+          <div><div class="row-label">静止后自动隐藏光标</div><div class="row-desc">停止移动数秒后淡出，移动瞬间恢复</div></div>
+          <button id="toggleHideIdle" class="toggle"></button>
+        </div>
+        <div class="row" id="idleDelayRow">
+          <div class="row-label">静止隐藏等待时长</div>
+          <div class="range-wrap">
+            <input id="idleDelay" type="range" min="1" max="10" step="0.5" value="3" />
+            <span id="idleDelayVal" class="range-val">3.0 s</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Page 3: General -->
+    <section id="page-general" class="page">
+      <h2>通用与状态</h2>
+      <p class="subtitle">Windows 原生引擎 · 独立光标安全守护进程保护。</p>
+
+      <div class="card">
+        <div class="card-title">系统运行状态</div>
+        <div class="row">
+          <div><div class="row-label">全局输入监听</div><div class="row-desc">独立高优先级钩子线程</div></div>
+          <span style="color:var(--emerald);font-weight:600">运行中</span>
+        </div>
+        <div class="row">
+          <div><div class="row-label">Windows 内置 OCR 中文识别</div><div class="row-desc">用于快捷键智能识别光标所在文字行</div></div>
+          <span id="ocrStatus" style="font-weight:600">检测中…</span>
+        </div>
+        <div class="row">
+          <div><div class="row-label">开机自动启动</div><div class="row-desc">登录 Windows 后自动常驻系统托盘</div></div>
+          <button id="toggleAutostart" class="toggle"></button>
+        </div>
+        <div class="row">
+          <div><div class="row-label">关闭控制台窗口时</div><div class="row-desc">后台运行时自动释放控制台界面内存</div></div>
+          <div class="seg" id="closeBehaviorSeg">
+            <button data-val="keepInTray">后台运行</button>
+            <button data-val="quitApp">彻底退出</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">常用操作速查</div>
+        <div class="row"><span>放大 / 缩回</span><span id="cheatTrigger"><span class="kbd">单击中键</span></span></div>
+        <div class="row"><span>实时调倍数</span><span id="cheatWheel"><span class="kbd">按住中键</span> + <span class="kbd">滚轮</span></span></div>
+        <div class="row"><span>画线 / 画直线</span><span><span class="kbd">左键拖动</span> / <span class="kbd">Shift + 拖动</span></span></div>
+        <div class="row"><span>正常拖拽文字</span><span><span class="kbd">Ctrl + 左键拖动</span></span></div>
+        <div class="row"><span>撤销 / 清空标注</span><span id="cheatUndo"><span class="kbd">右键</span> 或 <span class="kbd">Ctrl+Z</span> / <span class="kbd">Esc</span></span></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const INK_COLORS = [
+  { id: 'red', hex: '#ff3b30' }, { id: 'yellow', hex: '#ffd11a' },
+  { id: 'green', hex: '#33e080' }, { id: 'blue', hex: '#4099ff' },
+  { id: 'pink', hex: '#ff54b8' }, { id: 'white', hex: '#ffffff' }
+];
+const CLICK_COLORS = [
+  { id: 'blue', hex: '#338cff' }, { id: 'yellow', hex: '#ffcc1a' },
+  { id: 'red', hex: '#ff4d4d' }, { id: 'green', hex: '#33d980' },
+  { id: 'white', hex: '#ffffff' }
+];
+const CURSORS = [
+  { id: 'system', name: '系统原生', fill: '#64748b' },
+  { id: 'classic', name: '经典黑', fill: '#111214' },
+  { id: 'light', name: '经典白', fill: '#ffffff' },
+  { id: 'ocean', name: '海蓝', fill: '#38bdf8' },
+  { id: 'sunset', name: '日落', fill: '#fb7185' },
+  { id: 'mint', name: '薄荷', fill: '#34d399' },
+  { id: 'dot', name: '圆点', dot: true },
+  { id: 'spotlight', name: '聚光', halo: true }
+];
+const TRIGGER_LABELS = { middle: '中键', back: '后退侧键', forward: '前进侧键' };
+
+// Physical KeyboardEvent.code -> Win32 VK code & clean label (100% immune to Chinese IME keyCode === 229).
+function mapCodeToVk(code) {
+  if (/^Key([A-Z])$/.test(code)) {
+    const ch = code.slice(3);
+    return { vk: ch.charCodeAt(0), label: ch };
+  }
+  if (/^Digit([0-9])$/.test(code)) {
+    const d = code.slice(5);
+    return { vk: d.charCodeAt(0), label: d };
+  }
+  if (/^F([1-9]|1[0-2])$/.test(code)) {
+    const n = parseInt(code.slice(1), 10);
+    return { vk: 0x6F + n, label: 'F' + n };
+  }
+  const table = {
+    Minus: [0xBD, '-'], Equal: [0xBB, '='], BracketLeft: [0xDB, '['], BracketRight: [0xDD, ']'],
+    Backslash: [0xDC, '\\'], Semicolon: [0xBA, ';'], Quote: [0xDE, "'"], Comma: [0xBC, ','],
+    Period: [0xBE, '.'], Slash: [0xBF, '/'], Backquote: [0xC0, '`'], Space: [0x20, 'Space'],
+    Tab: [0x09, 'Tab'], Enter: [0x0D, 'Enter'],
+    ArrowUp: [0x26, 'Up'], ArrowDown: [0x28, 'Down'], ArrowLeft: [0x25, 'Left'], ArrowRight: [0x27, 'Right']
+  };
+  if (table[code]) return { vk: table[code][0], label: table[code][1] };
+  return null;
+}
+
+let state = null;
+let recordingTarget = null;
+
+function post(msg) {
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.postMessage(msg);
+  }
+}
+
+function updateSettings(patch) {
+  if (!state) return;
+  Object.assign(state, patch);
+  render();
+  post({ type: 'updateSettings', settings: state });
+}
+
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('page-' + btn.dataset.page).classList.add('active');
+  });
+});
+
+function bindSeg(id, key) {
+  document.querySelectorAll(`#${id} button`).forEach(btn => {
+    btn.addEventListener('click', () => updateSettings({ [key]: btn.dataset.val }));
+  });
+}
+bindSeg('triggerSeg', 'trigger');
+bindSeg('followSeg', 'followStyle');
+bindSeg('inkStyleSeg', 'inkStyle');
+bindSeg('clickEffectSeg', 'clickEffect');
+bindSeg('closeBehaviorSeg', 'closeWindowBehavior');
+
+function bindToggle(id, key) {
+  document.getElementById(id).addEventListener('click', () => {
+    if (!state) return;
+    updateSettings({ [key]: !state[key] });
+  });
+}
+bindToggle('toggleEnabled', 'enabled');
+bindToggle('toggleDraw', 'drawWhileZoomed');
+bindToggle('toggleAlwaysCursor', 'customCursorAlways');
+bindToggle('toggleSmoothCursor', 'smoothCursor');
+bindToggle('toggleHideIdle', 'hideIdleCursor');
+bindToggle('toggleAutostart', 'launchAtLogin');
+
+document.getElementById('defaultZoom').addEventListener('input', e => updateSettings({ defaultZoom: parseFloat(e.target.value) }));
+document.getElementById('strokeWidth').addEventListener('input', e => updateSettings({ strokeWidth: parseFloat(e.target.value) }));
+document.getElementById('cursorSize').addEventListener('input', e => updateSettings({ cursorSize: parseFloat(e.target.value) }));
+document.getElementById('idleDelay').addEventListener('input', e => updateSettings({ idleDelay: parseFloat(e.target.value) }));
+
+function buildSwatches(containerId, list, key) {
+  const el = document.getElementById(containerId);
+  list.forEach(c => {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.dataset.val = c.id;
+    b.style.background = c.hex;
+    b.addEventListener('click', () => updateSettings({ [key]: c.id }));
+    el.appendChild(b);
+  });
+}
+buildSwatches('inkColors', INK_COLORS, 'inkColor');
+buildSwatches('clickColors', CLICK_COLORS, 'clickColor');
+
+const cursorGrid = document.getElementById('cursorGrid');
+CURSORS.forEach(c => {
+  const div = document.createElement('div');
+  div.className = 'cursor-card';
+  div.dataset.val = c.id;
+  const svg = c.dot
+    ? `<svg width="26" height="26" viewBox="0 0 26 26"><circle cx="13" cy="13" r="8" fill="#18181b" stroke="#fff" stroke-width="2"/></svg>`
+    : c.halo
+      ? `<svg width="26" height="26" viewBox="0 0 26 26"><circle cx="13" cy="13" r="11" fill="rgba(250,204,21,0.45)"/><path d="M9 5 L9 20 L12.5 16.5 L15 21 L17 20 L14.5 15.5 L19 15.5 Z" fill="#111" stroke="#fff" stroke-width="1.4"/></svg>`
+      : `<svg width="26" height="26" viewBox="0 0 26 26"><path d="M7 4 L7 20.5 L10.9 16.8 L13.6 23 L16.3 21.8 L13.7 15.8 L18.8 15.8 Z" fill="${c.fill}" stroke="${c.id==='light'?'#1e293b':'#fff'}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+  div.innerHTML = `${svg}<span>${c.name}</span>`;
+  div.addEventListener('click', () => updateSettings({ cursorStyle: c.id }));
+  cursorGrid.appendChild(div);
+});
+
+document.querySelectorAll('.shortcut-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    recordingTarget = btn.dataset.shortcut;
+    render();
+  });
+});
+
+window.addEventListener('keydown', e => {
+  if (!recordingTarget || !state) return;
+  e.preventDefault();
+  if (e.code === 'Escape') {
+    recordingTarget = null;
+    render();
+    return;
+  }
+  if (e.code === 'Backspace' || e.code === 'Delete') {
+    const target = recordingTarget;
+    recordingTarget = null;
+    post({ type: 'setShortcut', target, shortcut: null });
+    return;
+  }
+  // Ignore standalone modifiers or Win/Meta combinations.
+  if (['ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(e.code)) return;
+  if (e.metaKey) return;
+
+  const mapped = mapCodeToVk(e.code);
+  if (!mapped) return;
+
+  let mods = 0;
+  const parts = [];
+  if (e.ctrlKey) { mods |= 1; parts.push('Ctrl'); }
+  if (e.altKey) { mods |= 2; parts.push('Alt'); }
+  if (e.shiftKey) { mods |= 4; parts.push('Shift'); }
+  parts.push(mapped.label);
+
+  const sc = { vk: mapped.vk, modifiers: mods, display: parts.join('+') };
+  const target = recordingTarget;
+  recordingTarget = null;
+  post({ type: 'setShortcut', target, shortcut: sc });
+});
+
+function render() {
+  if (!state) return;
+  const pill = document.getElementById('statusPill');
+  pill.classList.toggle('paused', !state.enabled);
+  document.getElementById('statusText').textContent = state.enabled ? '就绪 · 可随时放大' : '已暂停 · 点击下方开启';
+
+  const trig = TRIGGER_LABELS[state.trigger] || '中键';
+  document.getElementById('powerHint').textContent = `单击${trig}放大`;
+  document.getElementById('cheatTrigger').innerHTML = `<span class="kbd">单击${trig}</span>`;
+  document.getElementById('cheatWheel').innerHTML = `<span class="kbd">按住${trig}</span> + <span class="kbd">滚轮</span>`;
+  const undoText = state.undoShortcut ? `<span class="kbd">右键</span> 或 <span class="kbd">${state.undoShortcut.display}</span> / <span class="kbd">Esc</span>` : `<span class="kbd">右键</span> / <span class="kbd">Esc</span>`;
+  document.getElementById('cheatUndo').innerHTML = undoText;
+
+  document.getElementById('toggleEnabled').classList.toggle('on', state.enabled);
+  document.getElementById('toggleDraw').classList.toggle('on', state.drawWhileZoomed);
+  document.getElementById('toggleAlwaysCursor').classList.toggle('on', state.customCursorAlways);
+  document.getElementById('toggleSmoothCursor').classList.toggle('on', state.smoothCursor);
+  document.getElementById('toggleHideIdle').classList.toggle('on', state.hideIdleCursor);
+  document.getElementById('toggleAutostart').classList.toggle('on', state.launchAtLogin);
+
+  document.getElementById('idleDelayRow').style.display = state.hideIdleCursor ? 'flex' : 'none';
+  document.getElementById('idleDelay').value = state.idleDelay;
+  document.getElementById('idleDelayVal').textContent = state.idleDelay.toFixed(1) + ' s';
+
+  document.getElementById('defaultZoom').value = state.defaultZoom;
+  document.getElementById('defaultZoomVal').textContent = state.defaultZoom.toFixed(2).replace(/\.00$/, '.0') + '×';
+  document.getElementById('strokeWidth').value = state.strokeWidth;
+  document.getElementById('strokeWidthVal').textContent = Math.round(state.strokeWidth) + ' px';
+  document.getElementById('cursorSize').value = state.cursorSize;
+  document.getElementById('cursorSizeVal').textContent = state.cursorSize.toFixed(1) + '×';
+
+  const markSeg = (id, val) => document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle('active', b.dataset.val === val));
+  markSeg('triggerSeg', state.trigger);
+  markSeg('followSeg', state.followStyle);
+  markSeg('inkStyleSeg', state.inkStyle);
+  markSeg('clickEffectSeg', state.clickEffect);
+  markSeg('closeBehaviorSeg', state.closeWindowBehavior);
+
+  document.querySelectorAll('#inkColors .swatch').forEach(b => b.classList.toggle('active', b.dataset.val === state.inkColor));
+  document.querySelectorAll('#clickColors .swatch').forEach(b => b.classList.toggle('active', b.dataset.val === state.clickColor));
+  document.querySelectorAll('#cursorGrid .cursor-card').forEach(c => c.classList.toggle('active', c.dataset.val === state.cursorStyle));
+
+  document.querySelectorAll('.shortcut-btn').forEach(btn => {
+    const key = btn.dataset.shortcut;
+    const isRec = recordingTarget === key;
+    btn.classList.toggle('recording', isRec);
+    if (isRec) {
+      btn.textContent = '请按快捷键…';
+    } else if (key === 'undo') {
+      btn.textContent = state.undoShortcut ? state.undoShortcut.display : '未设置';
+    } else {
+      const sc = state.shortcuts && state.shortcuts[key];
+      btn.textContent = sc ? sc.display : '未设置';
+    }
+  });
+}
+
+window.__livezoomHydrate = (payload) => {
+  state = payload.settings;
+  const ocrEl = document.getElementById('ocrStatus');
+  if (payload.chineseOcr) {
+    ocrEl.textContent = '已就绪（中英文）';
+    ocrEl.style.color = '#10b981';
+  } else {
+    ocrEl.textContent = '仅当前系统语言（建议安装简体中文语言包）';
+    ocrEl.style.color = '#f59e0b';
+  }
+  render();
+};
+
+post({ type: 'ready' });
+</script>
+</body>
+</html>
