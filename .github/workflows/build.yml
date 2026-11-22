@@ -155,10 +155,76 @@ jobs:
           path: ${{ steps.pkg.outputs.dmg }}
           if-no-files-found: error
 
+  test-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Windows core tests
+        run: cargo test --locked
+
+  build-windows:
+    needs: test-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release tag matches Windows Cargo.toml and app.manifest versions
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $cargoToml = Get-Content windows/Cargo.toml -Raw
+          if ($cargoToml -match '(?ms)\[package\].*?^version\s*=\s*"([^"]+)"') {
+            $winVersion = $Matches[1]
+          } else {
+            Write-Error "Could not parse [package] version from windows/Cargo.toml"
+            exit 1
+          }
+          if ($winVersion -ne $tagVersion) {
+            Write-Error "Tag ${{ github.ref_name }} does not match windows/Cargo.toml version $winVersion."
+            exit 1
+          }
+          $manifest = Get-Content windows/assets/app.manifest -Raw
+          if ($manifest -match 'assemblyIdentity[^>]*version="([^"]+)"') {
+            $manifestVer = $Matches[1]
+          } else {
+            Write-Error "Could not parse assemblyIdentity version from windows/assets/app.manifest"
+            exit 1
+          }
+          $expectedManifestVer = "$tagVersion.0"
+          if ($manifestVer -ne $expectedManifestVer) {
+            Write-Error "Tag ${{ github.ref_name }} does not match windows/assets/app.manifest version $manifestVer (expected $expectedManifestVer)."
+            exit 1
+          }
+
+      - name: Build LiveZoom.exe (x86_64-pc-windows-msvc)
+        working-directory: windows
+        run: cargo build --release --locked
+
+      - name: Package Windows executable
+        id: pkg-win
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content windows/Cargo.toml -Raw
+          $null = $cargoToml -match '(?ms)\[package\].*?^version\s*=\s*"([^"]+)"'
+          $version = $Matches[1]
+          $exe = "LiveZoom-$version-windows-x64.exe"
+          Copy-Item "windows/target/release/LiveZoom.exe" $exe
+          "exe=$exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiveZoom-windows-x64
+          path: ${{ steps.pkg-win.outputs.exe }}
+          if-no-files-found: error
+
   release:
-    # 推送 v* 标签时，把两个版本发布到 GitHub Release
+    # 推送 v* 标签时，把三个版本（macOS Apple Silicon / macOS Intel / Windows x64）发布到 GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -171,7 +237,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.dmg \
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.exe \
             --repo "$GITHUB_REPOSITORY" \
             --title "LiveZoom ${GITHUB_REF_NAME#v}" \
             --generate-notes

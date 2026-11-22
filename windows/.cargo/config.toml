@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# Statically link MSVC CRT so the single LiveZoom.exe runs on clean Windows 10/11
+# without requiring the Visual C++ Redistributable (VCRUNTIME140.dll).
+rustflags = ["-C", "target-feature=+crt-static"]
