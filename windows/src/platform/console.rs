@@ -42,6 +42,7 @@ pub enum ConsoleEvent {
     EnterModalMove,
     ExitModalMove,
     Closed,
+    Quit,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +71,7 @@ impl ShortcutTarget {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum WebMessage {
     Ready,
+    Quit,
     UpdateSettings {
         settings: AppSettings,
     },
@@ -214,16 +216,18 @@ impl ConsoleWindow {
 impl Drop for ConsoleWindow {
     fn drop(&mut self) {
         self.inner.closed.set(true);
-        if let Some(ctrl) = self.inner.controller.borrow_mut().take() {
-            unsafe {
-                let _ = ctrl.Close();
-            }
-        }
-        self.inner.webview.borrow_mut().take();
         let hwnd = self.inner.hwnd.replace(HWND::default());
         unsafe {
+            // Closing WebView2 can dispatch window messages before returning.
             if !hwnd.0.is_null() {
                 let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            let controller = self.inner.controller.borrow_mut().take();
+            if let Some(ctrl) = controller {
+                let _ = ctrl.Close();
+            }
+            self.inner.webview.borrow_mut().take();
+            if !hwnd.0.is_null() {
                 let _ = DestroyWindow(hwnd);
             }
         }
@@ -329,6 +333,11 @@ fn init_webview2(weak_inner: Weak<ConsoleInner>) {
                                                         match msg {
                                                             WebMessage::Ready => {
                                                                 hydrate_webview(&inner_msg);
+                                                            }
+                                                            WebMessage::Quit => {
+                                                                let _ = inner_msg
+                                                                    .tx
+                                                                    .send(ConsoleEvent::Quit);
                                                             }
                                                             WebMessage::UpdateSettings {
                                                                 settings,

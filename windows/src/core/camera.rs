@@ -7,6 +7,20 @@ use crate::core::smooth_damp::smooth_damp_step;
 pub struct ViewportMath;
 
 impl ViewportMath {
+    /// Origin of the integer source rectangle used by the Windows magnifier control.
+    pub fn magnifier_origin(viewport: Rect, display: Size) -> Point {
+        Point::new(
+            viewport
+                .x
+                .round()
+                .clamp(0.0, display.width - viewport.width.ceil()),
+            viewport
+                .y
+                .round()
+                .clamp(0.0, display.height - viewport.height.ceil()),
+        )
+    }
+
     #[inline]
     pub fn size(display: Size, zoom: f64) -> Size {
         Size::new(display.width / zoom, display.height / zoom)
@@ -316,6 +330,37 @@ impl ZoomCamera {
             CameraPhase::Zoomed => {
                 self.follow(cursor, dt);
             }
+        }
+    }
+
+    /// Preserve the cursor hotspot when motion outruns smooth follow. Check the
+    /// integer source origin and f32 scale the compositor actually receives.
+    pub fn keep_cursor_visible(&mut self, cursor: Point) {
+        let zoom = self.zoom as f32 as f64;
+        let viewport = ViewportMath::rect(self.center, zoom, self.display);
+        let origin = ViewportMath::magnifier_origin(viewport, self.display);
+        let reveal = |point: f64, start: f64, extent: f64| {
+            if point < start {
+                point.floor()
+            } else if point >= start + extent {
+                (point + 1.0 - extent).ceil()
+            } else {
+                start
+            }
+        };
+        let x = reveal(cursor.x, origin.x, viewport.width);
+        let y = reveal(cursor.y, origin.y, viewport.height);
+        if x != origin.x {
+            self.center.x = x + viewport.width * 0.5;
+            self.velocity.dx = 0.0;
+        }
+        if y != origin.y {
+            self.center.y = y + viewport.height * 0.5;
+            self.velocity.dy = 0.0;
+        }
+        if x != origin.x || y != origin.y {
+            self.center = ViewportMath::clamp_center(self.center, zoom, self.display);
+            self.target_center = self.follow_target(self.center, cursor, zoom);
         }
     }
 

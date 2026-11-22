@@ -1,5 +1,6 @@
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Magnification::{
     MagInitialize, MagSetWindowFilterList, MagSetWindowSource, MagSetWindowTransform,
@@ -12,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
+use crate::core::camera::ViewportMath;
 use crate::core::geometry::{Point, Rect};
 
 /// Full-screen click-through Windows Magnification API host (`WC_MAGNIFIER`).
@@ -23,6 +25,8 @@ pub struct MagnifierHost {
     mag_hwnd: HWND,
     visible: bool,
     display_bounds: Rect,
+    last_transform: Option<f32>,
+    last_source: Option<RECT>,
 }
 
 impl MagnifierHost {
@@ -96,6 +100,8 @@ impl MagnifierHost {
                 mag_hwnd,
                 visible: false,
                 display_bounds,
+                last_transform: None,
+                last_source: None,
             })
         }
     }
@@ -126,45 +132,36 @@ impl MagnifierHost {
     }
 
     /// Repositions the magnifier onto a different display when the user zooms on another monitor.
-    pub fn set_display_bounds(&mut self, bounds: Rect) {
+    pub fn set_display_bounds(&mut self, bounds: Rect) -> windows::core::Result<()> {
         if self.display_bounds == bounds {
-            return;
+            return Ok(());
         }
-        self.display_bounds = bounds;
         let x = bounds.x.round() as i32;
         let y = bounds.y.round() as i32;
         let w = bounds.width.round() as i32;
         let h = bounds.height.round() as i32;
         unsafe {
-            let _ = SetWindowPos(
-                self.host_hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                w,
-                h,
-                SWP_NOACTIVATE,
-            );
-            let _ = SetWindowPos(self.mag_hwnd, None, 0, 0, w, h, SWP_NOACTIVATE);
+            SetWindowPos(self.host_hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE)?;
+            SetWindowPos(self.mag_hwnd, None, 0, 0, w, h, SWP_NOACTIVATE)?;
         }
+        self.display_bounds = bounds;
+        self.last_source = None;
+        Ok(())
     }
 
     /// Updates magnification scale and source rectangle (display-local physical pixels).
     /// Returns the exact integer-snapped display-local origin passed to `MagSetWindowSource`
     /// so `OverlayWindow` stays locked pixel-for-pixel with the magnified image (zero pan jitter).
-    pub fn render(&mut self, viewport_local: Rect, zoom: f64) -> Point {
+    pub fn render(&mut self, viewport_local: Rect, zoom: f64) -> Result<Point, ()> {
         let z = zoom.max(1.0) as f32;
-        let mut transform = MAGTRANSFORM::default();
-        transform.v[0] = z;
-        transform.v[4] = z;
-        transform.v[8] = 1.0;
 
         let disp_x = self.display_bounds.x.round() as i32;
         let disp_y = self.display_bounds.y.round() as i32;
-        let local_x = viewport_local.x.round() as i32;
-        let local_y = viewport_local.y.round() as i32;
-        let src_w = viewport_local.width.round().max(1.0) as i32;
-        let src_h = viewport_local.height.round().max(1.0) as i32;
+        let origin = ViewportMath::magnifier_origin(viewport_local, self.display_bounds.size());
+        let local_x = origin.x as i32;
+        let local_y = origin.y as i32;
+        let src_w = viewport_local.width.ceil() as i32;
+        let src_h = viewport_local.height.ceil() as i32;
 
         let src = RECT {
             left: disp_x + local_x,
@@ -174,8 +171,25 @@ impl MagnifierHost {
         };
 
         unsafe {
-            let _ = MagSetWindowTransform(self.mag_hwnd, &mut transform);
-            let _ = MagSetWindowSource(self.mag_hwnd, src);
+            if self.last_transform != Some(z) {
+                let mut transform = MAGTRANSFORM::default();
+                transform.v[0] = z;
+                transform.v[4] = z;
+                transform.v[8] = 1.0;
+                if !MagSetWindowTransform(self.mag_hwnd, &mut transform).as_bool() {
+                    return Err(());
+                }
+                self.last_transform = Some(z);
+            }
+            if self.last_source != Some(src) {
+                if !MagSetWindowSource(self.mag_hwnd, src).as_bool() {
+                    return Err(());
+                }
+                self.last_source = Some(src);
+            } else {
+                // The source geometry can stay still while windows inside it continue to animate.
+                let _ = InvalidateRect(self.mag_hwnd, None, false);
+            }
             if !self.visible {
                 let _ = ShowWindow(self.host_hwnd, SW_SHOWNOACTIVATE);
                 let _ = SetWindowPos(
@@ -191,7 +205,7 @@ impl MagnifierHost {
             }
         }
 
-        Point::new(local_x as f64, local_y as f64)
+        Ok(origin)
     }
 
     pub fn hide(&mut self) {
@@ -202,6 +216,7 @@ impl MagnifierHost {
             let _ = ShowWindow(self.host_hwnd, SW_HIDE);
         }
         self.visible = false;
+        self.last_source = None;
     }
 
     #[allow(dead_code)]

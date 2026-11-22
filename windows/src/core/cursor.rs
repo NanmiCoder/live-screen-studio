@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::geometry::{Point, Rect, Vector};
+use crate::core::geometry::{Point, Vector};
 use crate::core::smooth_damp::smooth_damp_step;
 
 /// 8 pointer styles matching macOS LiveZoom.
@@ -172,45 +172,5 @@ impl CursorMotion {
         self.last_activity = now;
         self.velocity = Vector::ZERO;
         self.opacity = 1.0;
-    }
-}
-
-/// Tracks a swallowed drag without moving the system cursor.
-#[derive(Debug, Clone, Copy)]
-pub struct DragPointer {
-    location: Point,
-    previous_sample: Point,
-}
-
-impl DragPointer {
-    pub fn new(point: Point, bounds: Option<Rect>) -> Self {
-        Self {
-            location: Self::confined(point, bounds),
-            previous_sample: point,
-        }
-    }
-
-    #[inline]
-    pub fn location(&self) -> Point {
-        self.location
-    }
-
-    pub fn move_to(&mut self, sample: Point, bounds: Option<Rect>) {
-        let next = Point::new(
-            self.location.x + (sample.x - self.previous_sample.x),
-            self.location.y + (sample.y - self.previous_sample.y),
-        );
-        self.previous_sample = sample;
-        self.location = Self::confined(next, bounds);
-    }
-
-    fn confined(point: Point, bounds: Option<Rect>) -> Point {
-        match bounds {
-            Some(b) => Point::new(
-                point.x.clamp(b.min_x(), b.max_x()),
-                point.y.clamp(b.min_y(), b.max_y()),
-            ),
-            None => point,
-        }
     }
 }

@@ -141,6 +141,7 @@
     <button class="nav-btn" data-page="cursor">光标与动效</button>
     <button class="nav-btn" data-page="general">通用与状态</button>
     <div class="spacer"></div>
+    <button class="nav-btn" id="quitApp">退出 LiveZoom</button>
     <div class="power-box">
       <div>
         <div style="font-weight:600">启用放大</div>
@@ -186,7 +187,7 @@
       <div class="card">
         <div class="card-title">画线标注与文字高亮</div>
         <div class="row">
-          <div><div class="row-label">放大时左键拖动直接画线</div><div class="row-desc">按住 Shift 画直线，Ctrl+拖动正常选中文字</div></div>
+          <div><div class="row-label">放大时使用标注手势</div><div class="row-desc">按住 Ctrl+Alt 并左键拖动，再按住 Shift 画直线</div></div>
           <button id="toggleDraw" class="toggle on"></button>
         </div>
         <div class="row">
@@ -211,7 +212,7 @@
           </div>
         </div>
         <div class="row">
-          <div><div class="row-label">撤销上一笔快捷键</div><div class="row-desc">放大且有标注时生效（右键也可撤销，Esc 清空；Backspace 清除绑定）</div></div>
+          <div><div class="row-label">撤销上一笔快捷键</div><div class="row-desc">放大且有标注时生效。Esc 清空标注，Backspace 清除绑定</div></div>
           <button class="shortcut-btn" data-shortcut="undo">Ctrl+Z</button>
         </div>
         <div class="row">
@@ -317,10 +318,10 @@
       <div class="card">
         <div class="card-title">常用操作速查</div>
         <div class="row"><span>放大 / 缩回</span><span id="cheatTrigger"><span class="kbd">单击中键</span></span></div>
+        <div class="row"><span>无标注时退出放大</span><span class="kbd">Esc</span></div>
         <div class="row"><span>实时调倍数</span><span id="cheatWheel"><span class="kbd">按住中键</span> + <span class="kbd">滚轮</span></span></div>
-        <div class="row"><span>画线 / 画直线</span><span><span class="kbd">左键拖动</span> / <span class="kbd">Shift + 拖动</span></span></div>
-        <div class="row"><span>正常拖拽文字</span><span><span class="kbd">Ctrl + 左键拖动</span></span></div>
-        <div class="row"><span>撤销 / 清空标注</span><span id="cheatUndo"><span class="kbd">右键</span> 或 <span class="kbd">Ctrl+Z</span> / <span class="kbd">Esc</span></span></div>
+        <div class="row"><span>画线 / 画直线</span><span><span class="kbd">Ctrl+Alt + 左键拖动</span> / 再按住 <span class="kbd">Shift</span></span></div>
+        <div class="row"><span>撤销 / 清空标注</span><span id="cheatUndo"><span class="kbd">Ctrl+Z</span> / <span class="kbd">Esc</span></span></div>
       </div>
     </section>
   </main>
@@ -382,6 +383,8 @@ function post(msg) {
     window.chrome.webview.postMessage(msg);
   }
 }
+
+document.getElementById('quitApp').addEventListener('click', () => post({ type: 'quit' }));
 
 function updateSettings(patch) {
   if (!state) return;
@@ -508,7 +511,7 @@ function render() {
   document.getElementById('powerHint').textContent = `单击${trig}放大`;
   document.getElementById('cheatTrigger').innerHTML = `<span class="kbd">单击${trig}</span>`;
   document.getElementById('cheatWheel').innerHTML = `<span class="kbd">按住${trig}</span> + <span class="kbd">滚轮</span>`;
-  const undoText = state.undoShortcut ? `<span class="kbd">右键</span> 或 <span class="kbd">${state.undoShortcut.display}</span> / <span class="kbd">Esc</span>` : `<span class="kbd">右键</span> / <span class="kbd">Esc</span>`;
+  const undoText = state.undoShortcut ? `<span class="kbd">${state.undoShortcut.display}</span> / <span class="kbd">Esc</span>` : `<span class="kbd">Esc</span>`;
   document.getElementById('cheatUndo').innerHTML = undoText;
 
   document.getElementById('toggleEnabled').classList.toggle('on', state.enabled);
