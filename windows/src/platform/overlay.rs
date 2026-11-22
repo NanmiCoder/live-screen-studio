@@ -1,10 +1,10 @@
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{
-    COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
@@ -34,16 +34,15 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED,
-    DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_WAS_STILL_DRAWING,
+    DXGI_PRESENT_DO_NOT_WAIT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SW_HIDE, SW_SHOWNOACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -98,6 +97,7 @@ struct AnnotationFrameKey {
     origin_x_bits: u64,
     origin_y_bits: u64,
     annotations_rev: u64,
+    animating: bool,
 }
 
 #[derive(PartialEq)]
@@ -122,9 +122,9 @@ struct GpuResources {
     _d2d_device: ID2D1Device,
     d2d_ctx: ID2D1DeviceContext,
     swap_chain: IDXGISwapChain1,
-    target_bitmap: Option<ID2D1Bitmap1>,
+    target_bitmap: ID2D1Bitmap1,
     dcomp_device: IDCompositionDevice,
-    dcomp_target: Option<IDCompositionTarget>,
+    _dcomp_target: IDCompositionTarget,
     annotation_visual: IDCompositionVisual,
     cursor_visual: IDCompositionVisual,
     cursor_surface: Option<CursorSurface>,
@@ -141,8 +141,18 @@ pub struct OverlayWindow {
     hwnd: HWND,
     bounds: Rect,
     visible: bool,
+    renderer: Option<OverlayRenderer>,
+    retry_at: Instant,
+}
+
+struct OverlayRenderer {
     gpu: GpuResources,
     last_annotations: Option<AnnotationFrameKey>,
+}
+
+const DEVICE_RETRY_DELAY: Duration = Duration::from_millis(500);
+thread_local! {
+    static CHECK_DEVICE: Cell<bool> = const { Cell::new(false) };
 }
 
 impl OverlayWindow {
@@ -160,8 +170,8 @@ impl OverlayWindow {
 
             let x = bounds.x.round() as i32;
             let y = bounds.y.round() as i32;
-            let w_px = (bounds.width.round() as u32).max(1);
-            let h_px = (bounds.height.round() as u32).max(1);
+            let w_px = bounds.width.round() as i32;
+            let h_px = bounds.height.round() as i32;
 
             let hwnd = CreateWindowExW(
                 WS_EX_NOREDIRECTIONBITMAP
@@ -175,8 +185,8 @@ impl OverlayWindow {
                 WS_POPUP,
                 x,
                 y,
-                w_px as i32,
-                h_px as i32,
+                w_px,
+                h_px,
                 None,
                 None,
                 hinstance,
@@ -185,9 +195,8 @@ impl OverlayWindow {
             .map_err(|e| format!("CreateWindowExW(Overlay) failed: {e}"))?;
 
             // Layered + transparent windows are skipped by cross-process mouse hit testing.
-            let gpu = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
+            SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
                 .map_err(|e| format!("SetLayeredWindowAttributes(Overlay) failed: {e}"))
-                .and_then(|()| create_gpu_resources(hwnd, w_px, h_px))
                 .inspect_err(|_| {
                     let _ = DestroyWindow(hwnd);
                 })?;
@@ -196,8 +205,8 @@ impl OverlayWindow {
                 hwnd,
                 bounds,
                 visible: false,
-                gpu,
-                last_annotations: None,
+                renderer: None,
+                retry_at: Instant::now(),
             })
         }
     }
@@ -211,69 +220,104 @@ impl OverlayWindow {
     }
 
     pub fn set_bounds(&mut self, bounds: Rect) {
-        if self.bounds == bounds {
+        if bounds == self.bounds {
             return;
         }
+        let resize = bounds.size() != self.bounds.size();
         self.bounds = bounds;
-        self.last_annotations = None;
-        let x = bounds.x.round() as i32;
-        let y = bounds.y.round() as i32;
-        let w = (bounds.width.round() as u32).max(1);
-        let h = (bounds.height.round() as u32).max(1);
-        unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                w as i32,
-                h as i32,
-                SWP_NOACTIVATE,
-            );
-            self.gpu.d2d_ctx.SetTarget(None);
-            let _ = self.gpu.annotation_visual.SetContent(None);
-            let _ = self.gpu.dcomp_device.Commit();
-            self.gpu.target_bitmap = None;
-            let _ = self.gpu.swap_chain.ResizeBuffers(
-                2,
-                w,
-                h,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            );
-            if let Ok(bmp) = bind_backbuffer(&self.gpu.d2d_ctx, &self.gpu.swap_chain) {
-                self.gpu.target_bitmap = Some(bmp);
-            }
+        if self.position_window().is_err() {
+            self.invalidate_renderer();
+        } else if resize {
+            // A new monitor size needs a new backbuffer; position-only changes reuse it.
+            self.renderer = None;
+            self.retry_at = Instant::now();
         }
     }
 
-    /// Rebuilds D3D11/D2D/DirectComposition resources after `D2DERR_RECREATE_TARGET` or GPU device reset.
-    pub fn recreate_device(&mut self) -> Result<(), String> {
-        let w = (self.bounds.width.round() as u32).max(1);
-        let h = (self.bounds.height.round() as u32).max(1);
-        // DirectComposition allows a single topmost target per HWND.
-        self.gpu.dcomp_target.take();
-        self.gpu = unsafe { create_gpu_resources(self.hwnd, w, h)? };
-        self.last_annotations = None;
-        Ok(())
+    fn position_window(&self) -> windows::core::Result<()> {
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                self.bounds.x as i32,
+                self.bounds.y as i32,
+                self.bounds.width as i32,
+                self.bounds.height as i32,
+                SWP_NOACTIVATE,
+            )
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.renderer.is_some()
+    }
+
+    fn invalidate_renderer(&mut self) {
+        self.hide();
+        self.renderer = None;
+        self.retry_at = Instant::now() + DEVICE_RETRY_DELAY;
+    }
+
+    fn check_device(&mut self) {
+        if CHECK_DEVICE.take()
+            && self.renderer.as_ref().is_some_and(|renderer| unsafe {
+                !renderer
+                    .gpu
+                    .dcomp_device
+                    .CheckDeviceState()
+                    .is_ok_and(|valid| valid.as_bool())
+            })
+        {
+            self.invalidate_renderer();
+        }
     }
 
     pub fn render(&mut self, frame: &OverlayFrame<'_>) -> Result<(), ()> {
+        self.check_device();
         let cursor = frame.cursor.as_ref().filter(|c| c.opacity > 0.0);
         if frame.annotations.is_empty() && frame.click_marks.is_empty() && cursor.is_none() {
             self.hide();
             return Ok(());
         }
 
+        if self.renderer.is_none() && Instant::now() >= self.retry_at {
+            let gpu = self
+                .position_window()
+                .map_err(|e| e.to_string())
+                .and_then(|()| unsafe {
+                    create_gpu_resources(
+                        self.hwnd,
+                        self.bounds.width as u32,
+                        self.bounds.height as u32,
+                    )
+                });
+            match gpu {
+                Ok(gpu) => {
+                    self.renderer = Some(OverlayRenderer {
+                        gpu,
+                        last_annotations: None,
+                    })
+                }
+                Err(_) => self.invalidate_renderer(),
+            }
+        }
+        let Some(renderer) = self.renderer.as_mut() else {
+            return Err(());
+        };
+
+        // Submit the replacement cursor before the caller hides the system cursor.
+        if unsafe { renderer.render_visuals(frame, cursor) }.is_err() {
+            self.invalidate_renderer();
+            return Err(());
+        }
         unsafe {
             let just_shown = !self.visible;
             if just_shown {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
                 self.visible = true;
             }
-            // Only re-assert HWND_TOPMOST on visibility/magnifier state transitions, never 240x/sec while idle.
             if just_shown || frame.ensure_topmost {
-                let _ = SetWindowPos(
+                if SetWindowPos(
                     self.hwnd,
                     HWND_TOPMOST,
                     0,
@@ -281,27 +325,28 @@ impl OverlayWindow {
                     0,
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
-
-            match self.render_visuals(frame, cursor) {
-                Ok(()) => Ok(()),
-                Err(hr)
-                    if matches!(
-                        hr,
-                        D2DERR_RECREATE_TARGET
-                            | DXGI_ERROR_DEVICE_REMOVED
-                            | DXGI_ERROR_DEVICE_RESET
-                    ) =>
+                )
+                .is_err()
                 {
-                    self.recreate_device().map_err(|_| ())?;
-                    self.render_visuals(frame, cursor).map_err(|_| ())
+                    self.invalidate_renderer();
+                    return Err(());
                 }
-                Err(_) => Err(()),
             }
         }
+        Ok(())
     }
 
+    pub fn hide(&mut self) {
+        if self.visible {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.visible = false;
+        }
+    }
+}
+
+impl OverlayRenderer {
     unsafe fn render_visuals(
         &mut self,
         frame: &OverlayFrame<'_>,
@@ -317,17 +362,19 @@ impl OverlayWindow {
                 commit = true;
             }
         } else {
-            let key = AnnotationFrameKey {
-                zoom_bits: frame.zoom.to_bits(),
-                origin_x_bits: frame.zoom_origin.x.to_bits(),
-                origin_y_bits: frame.zoom_origin.y.to_bits(),
-                annotations_rev: frame.annotations_rev,
-            };
             let animating = !frame.click_marks.is_empty()
                 || frame
                     .annotations
                     .iter()
                     .any(|a| is_annotation_animating(a, frame.now));
+            let key = AnnotationFrameKey {
+                zoom_bits: frame.zoom.to_bits(),
+                origin_x_bits: frame.zoom_origin.x.to_bits(),
+                origin_y_bits: frame.zoom_origin.y.to_bits(),
+                annotations_rev: frame.annotations_rev,
+                // Draw the final static frame after the last transient effect expires.
+                animating,
+            };
             if animating || self.last_annotations.as_ref() != Some(&key) {
                 match self.draw_and_present(frame) {
                     Ok(()) => {
@@ -349,16 +396,6 @@ impl OverlayWindow {
             self.gpu.dcomp_device.Commit().map_err(|e| e.code())?;
         }
         Ok(())
-    }
-
-    pub fn hide(&mut self) {
-        if !self.visible {
-            return;
-        }
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
-        }
-        self.visible = false;
     }
 
     /// The compositor moves the cached cursor image without repainting a monitor-sized texture.
@@ -511,12 +548,7 @@ impl OverlayWindow {
         &mut self,
         frame: &OverlayFrame<'_>,
     ) -> Result<(), windows::core::HRESULT> {
-        let bitmap = self
-            .gpu
-            .target_bitmap
-            .as_ref()
-            .ok_or(D2DERR_RECREATE_TARGET)?;
-        self.gpu.d2d_ctx.SetTarget(bitmap);
+        self.gpu.d2d_ctx.SetTarget(&self.gpu.target_bitmap);
         self.gpu.d2d_ctx.BeginDraw();
         self.gpu.d2d_ctx.SetTransform(&Matrix3x2::identity());
         self.gpu.d2d_ctx.Clear(Some(&D2D1_COLOR_F {
@@ -1147,6 +1179,7 @@ impl OverlayWindow {
 
 impl Drop for OverlayWindow {
     fn drop(&mut self) {
+        self.renderer = None;
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
@@ -1297,9 +1330,9 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
         _d2d_device: d2d_device,
         d2d_ctx,
         swap_chain,
-        target_bitmap: Some(target_bitmap),
+        target_bitmap,
         dcomp_device,
-        dcomp_target: Some(dcomp_target),
+        _dcomp_target: dcomp_target,
         annotation_visual,
         cursor_visual,
         cursor_surface: None,
@@ -1420,5 +1453,8 @@ unsafe extern "system" fn overlay_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_PAINT {
+        CHECK_DEVICE.set(true);
+    }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }

@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::core::annotation::{AnnotationItem, HighlightKind, InkLook};
-use crate::core::camera::{CameraConfig, CameraPhase, ZoomCamera};
+use crate::core::camera::{CameraConfig, CameraPhase, ViewportMath, ZoomCamera};
 use crate::core::cursor::{CursorMotion, CursorStyle};
 use crate::core::geometry::{Point, Rect};
 use crate::core::input_fsm::InputAction;
@@ -179,7 +179,7 @@ fn run_inner() -> Result<(), String> {
     let input_hook = InputHook::start(msg_hwnd)?;
 
     let (console_tx, console_rx) = mpsc::channel::<ConsoleEvent>();
-    let (ocr_tx, ocr_rx) = mpsc::channel::<(HighlightKind, Option<Rect>)>();
+    let (ocr_tx, ocr_rx) = mpsc::channel::<(u64, HighlightKind, Option<Rect>)>();
     // Runs on a dedicated short-lived MTA thread so main thread's STA is never disturbed.
     let chinese_ocr = is_chinese_ocr_available();
 
@@ -196,7 +196,6 @@ fn run_inner() -> Result<(), String> {
     sync_exclusions(&magnifier, &overlay, &console);
 
     sync_hook_settings(&input_hook, &settings);
-    input_hook.set_drag_threshold_px(4.0 * initial_display.scale.max(1.0));
 
     let start_instant = Instant::now();
     let mut last_frame = start_instant;
@@ -207,7 +206,7 @@ fn run_inner() -> Result<(), String> {
     let mut last_zoom_origin = Point::ZERO;
     let mut last_zoom = 1.0f64;
     let mut motion = CursorMotion::new(cursor_position(), 0.0);
-    let mut drawing_pointer: Option<Point> = None;
+    let mut zoom_generation = 0u64;
     let mut annotations: Vec<AnnotationItem> = Vec::new();
     let mut annotations_rev: u64 = 0;
     let mut stroke_in_progress = false;
@@ -251,6 +250,7 @@ fn run_inner() -> Result<(), String> {
         // Helper closure to cleanly exit zoom mode from any trigger (disable toggle, display change, console open).
         let reset_zoom = |camera: &mut Option<ZoomCamera>,
                           magnifier: &mut MagnifierHost,
+                          cursor_sys: &mut SystemCursorManager,
                           annotations: &mut Vec<AnnotationItem>,
                           annotations_rev: &mut u64,
                           stroke_in_progress: &mut bool,
@@ -259,6 +259,7 @@ fn run_inner() -> Result<(), String> {
             if camera.is_some() {
                 *camera = None;
                 magnifier.hide();
+                cursor_sys.restore();
                 input_hook.set_drawing_armed(false);
                 input_hook.set_keys_armed(false);
                 annotations.clear();
@@ -281,6 +282,7 @@ fn run_inner() -> Result<(), String> {
                     reset_zoom(
                         &mut camera,
                         &mut magnifier,
+                        &mut cursor_sys,
                         &mut annotations,
                         &mut annotations_rev,
                         &mut stroke_in_progress,
@@ -303,6 +305,7 @@ fn run_inner() -> Result<(), String> {
                     reset_zoom(
                         &mut camera,
                         &mut magnifier,
+                        &mut cursor_sys,
                         &mut annotations,
                         &mut annotations_rev,
                         &mut stroke_in_progress,
@@ -360,17 +363,19 @@ fn run_inner() -> Result<(), String> {
                     reset_zoom(
                         &mut camera,
                         &mut magnifier,
+                        &mut cursor_sys,
                         &mut annotations,
                         &mut annotations_rev,
                         &mut stroke_in_progress,
                         &mut console,
                         &mut console_hidden_for_zoom,
                     );
+                    overlay.hide();
+                    cursor_sys.restore();
                     if let Some(disp) = display_under_point(cursor_position()) {
                         active_display = disp;
-                        magnifier.set_display_bounds(active_display.bounds);
+                        let _ = magnifier.set_display_bounds(active_display.bounds);
                         overlay.set_bounds(active_display.bounds);
-                        input_hook.set_drag_threshold_px(4.0 * active_display.scale.max(1.0));
                         sync_exclusions(&magnifier, &overlay, &console);
                     }
                 }
@@ -403,6 +408,7 @@ fn run_inner() -> Result<(), String> {
                         reset_zoom(
                             &mut camera,
                             &mut magnifier,
+                            &mut cursor_sys,
                             &mut annotations,
                             &mut annotations_rev,
                             &mut stroke_in_progress,
@@ -459,7 +465,10 @@ fn run_inner() -> Result<(), String> {
         }
 
         // 4. Process async OCR results.
-        while let Ok((kind, line_opt)) = ocr_rx.try_recv() {
+        while let Ok((generation, kind, line_opt)) = ocr_rx.try_recv() {
+            if generation != zoom_generation {
+                continue;
+            }
             if let (Some(line), Some(ref cam)) = (line_opt, &camera) {
                 if cam.phase() == CameraPhase::Zoomed || cam.phase() == CameraPhase::ZoomingIn {
                     if kind == HighlightKind::Spotlight {
@@ -489,7 +498,9 @@ fn run_inner() -> Result<(), String> {
         let needs_frame = actions.iter().any(|action| {
             matches!(
                 action,
-                InputAction::ToggleZoom | InputAction::CancelZoom | InputAction::AdjustZoom(_)
+                InputAction::ToggleZoom(_)
+                    | InputAction::CancelZoom
+                    | InputAction::AdjustZoom { .. }
             )
         });
         for action in actions {
@@ -497,71 +508,57 @@ fn run_inner() -> Result<(), String> {
                 InputAction::CancelZoom => reset_zoom(
                     &mut camera,
                     &mut magnifier,
+                    &mut cursor_sys,
                     &mut annotations,
                     &mut annotations_rev,
                     &mut stroke_in_progress,
                     &mut console,
                     &mut console_hidden_for_zoom,
                 ),
-                InputAction::ToggleZoom if settings.enabled => {
-                    let cur_global = drawing_pointer.unwrap_or_else(cursor_position);
-                    match camera.as_mut() {
-                        None => {
-                            if let Some(disp) = display_under_point(cur_global) {
-                                active_display = disp;
-                                magnifier.set_display_bounds(active_display.bounds);
-                                overlay.set_bounds(active_display.bounds);
-                                input_hook
-                                    .set_drag_threshold_px(4.0 * active_display.scale.max(1.0));
-                                // Hide console while zoomed so it never intercepts clicks behind the click-through magnifier.
-                                if let Some(ref mut c) = console {
-                                    c.set_visible(false);
-                                    console_hidden_for_zoom = true;
-                                }
-                                sync_exclusions(&magnifier, &overlay, &console);
-
-                                let cfg = make_camera_config(&settings, &active_display);
-                                let mut cam = ZoomCamera::new(active_display.size(), cfg);
-                                let local = active_display.to_local(cur_global);
-                                cam.zoom_in(settings.default_zoom, local, now);
-                                camera = Some(cam);
-                                ensure_overlay_topmost = true;
-                                input_hook.set_drawing_bounds(active_display.work_area);
-                                input_hook.set_drawing_armed(settings.draw_while_zoomed);
-                                input_hook.set_keys_armed(true);
-                            }
-                        }
-                        Some(cam) => {
-                            let local = active_display.to_local(cur_global);
-                            if cam.phase() == CameraPhase::ZoomingOut {
-                                cam.zoom_in(settings.default_zoom, local, now);
-                                ensure_overlay_topmost = true;
-                                input_hook.set_drawing_armed(settings.draw_while_zoomed);
-                                input_hook.set_keys_armed(true);
-                            } else {
-                                cam.zoom_out(local, now);
-                                input_hook.set_drawing_armed(false);
-                                input_hook.set_keys_armed(false);
-                                annotations.clear();
-                                annotations_rev = annotations_rev.wrapping_add(1);
-                                stroke_in_progress = false;
-                                input_hook.set_has_strokes(false);
-                            }
-                        }
+                InputAction::ToggleZoom(at) | InputAction::AdjustZoom { at, .. }
+                    if settings.enabled =>
+                {
+                    let adjustment = match action {
+                        InputAction::AdjustZoom { steps, .. } => Some(steps),
+                        _ => None,
+                    };
+                    if camera.is_some() && !active_display.bounds.contains_pixel(at) {
+                        reset_zoom(
+                            &mut camera,
+                            &mut magnifier,
+                            &mut cursor_sys,
+                            &mut annotations,
+                            &mut annotations_rev,
+                            &mut stroke_in_progress,
+                            &mut console,
+                            &mut console_hidden_for_zoom,
+                        );
+                        overlay.hide();
                     }
-                }
-                InputAction::AdjustZoom(steps) if settings.enabled => {
-                    let factor = (0.1 * steps).exp();
-                    if let Some(ref mut cam) = camera {
-                        cam.adjust_zoom(factor);
-                    } else if steps > 0.0 {
-                        // Match macOS: scrolling up while holding trigger at 1x starts zoom-in.
-                        let cur_global = drawing_pointer.unwrap_or_else(cursor_position);
-                        if let Some(disp) = display_under_point(cur_global) {
+                    if let Some(cam) = camera.as_mut() {
+                        let local = active_display.to_local(at);
+                        if let Some(steps) = adjustment {
+                            cam.adjust_zoom((0.1 * steps).exp());
+                        } else if cam.phase() == CameraPhase::ZoomingOut {
+                            cam.zoom_in(settings.default_zoom, local, now);
+                            input_hook.set_drawing_armed(settings.draw_while_zoomed);
+                            input_hook.set_keys_armed(true);
+                        } else {
+                            cam.zoom_out(local, now);
+                            input_hook.set_drawing_armed(false);
+                            input_hook.set_keys_armed(false);
+                            annotations.clear();
+                            annotations_rev = annotations_rev.wrapping_add(1);
+                            stroke_in_progress = false;
+                            input_hook.set_has_strokes(false);
+                        }
+                    } else if adjustment.is_none_or(|steps| steps > 0.0) {
+                        if let Some(disp) = display_under_point(at) {
+                            if magnifier.set_display_bounds(disp.bounds).is_err() {
+                                continue;
+                            }
                             active_display = disp;
-                            magnifier.set_display_bounds(active_display.bounds);
                             overlay.set_bounds(active_display.bounds);
-                            input_hook.set_drag_threshold_px(4.0 * active_display.scale.max(1.0));
                             if let Some(ref mut c) = console {
                                 c.set_visible(false);
                                 console_hidden_for_zoom = true;
@@ -570,11 +567,14 @@ fn run_inner() -> Result<(), String> {
 
                             let cfg = make_camera_config(&settings, &active_display);
                             let mut cam = ZoomCamera::new(active_display.size(), cfg);
-                            let local = active_display.to_local(cur_global);
-                            cam.zoom_in(settings.default_zoom, local, now);
+                            cam.zoom_in(settings.default_zoom, active_display.to_local(at), now);
                             camera = Some(cam);
+                            zoom_generation = zoom_generation.wrapping_add(1);
                             ensure_overlay_topmost = true;
-                            input_hook.set_drawing_bounds(active_display.work_area);
+                            input_hook.set_drawing_area(
+                                active_display.work_area,
+                                4.0 * active_display.scale,
+                            );
                             input_hook.set_drawing_armed(settings.draw_while_zoomed);
                             input_hook.set_keys_armed(true);
                         }
@@ -585,12 +585,6 @@ fn run_inner() -> Result<(), String> {
                         position: pt,
                         created_at: now,
                     });
-                }
-                InputAction::DrawingPointer(pt) => {
-                    drawing_pointer = pt;
-                    if let Some(p) = pt {
-                        motion.jump(p, now);
-                    }
                 }
                 InputAction::StrokeBegan(pt) => {
                     if let Some(ref mut cam) = camera {
@@ -616,7 +610,7 @@ fn run_inner() -> Result<(), String> {
                         }
                     }
                 }
-                InputAction::StrokeEnded(_) => {
+                InputAction::StrokeEnded => {
                     stroke_in_progress = false;
                     if let Some(ref mut cam) = camera {
                         cam.set_follow_paused(false);
@@ -652,7 +646,7 @@ fn run_inner() -> Result<(), String> {
                         continue;
                     }
                     if camera.is_some() {
-                        let cur_global = drawing_pointer.unwrap_or_else(cursor_position);
+                        let cur_global = cursor_position();
                         let cur_local = active_display.to_local(cur_global);
                         // Momentarily hide overlay for 1 DWM frame if annotations/spotlight exist so OCR sees clean text.
                         let temporarily_hidden = overlay.is_visible() && !annotations.is_empty();
@@ -674,17 +668,12 @@ fn run_inner() -> Result<(), String> {
                         if let Some(band) = band {
                             let tx = ocr_tx.clone();
                             recognize_band_async(band, move |line| {
-                                let _ = tx.send((kind, line));
+                                let _ = tx.send((zoom_generation, kind, line));
                             });
                         }
                     }
                 }
-                InputAction::ReplayLeftDown { .. }
-                | InputAction::ReplayLeftUp(_)
-                | InputAction::ReplayLeftClick { .. }
-                | InputAction::MoveOsCursor(_)
-                | InputAction::ToggleZoom
-                | InputAction::AdjustZoom(_) => {}
+                InputAction::ToggleZoom(_) | InputAction::AdjustZoom { .. } => {}
             }
         }
 
@@ -706,37 +695,36 @@ fn run_inner() -> Result<(), String> {
             .as_secs_f64()
             .min(0.05);
         last_frame = frame_start;
-        let raw_cursor_global = drawing_pointer.unwrap_or_else(cursor_position);
-        let is_zoomed = camera.is_some();
-
-        // Leave the pointer free to reach the taskbar and other monitors.
-        if let Some(ref mut cam) = camera {
-            if !active_display.bounds.contains(raw_cursor_global)
-                && cam.phase() != CameraPhase::ZoomingOut
-            {
-                let local = active_display.to_local(raw_cursor_global);
-                cam.zoom_out(local, now);
-                input_hook.set_drawing_armed(false);
-                input_hook.set_keys_armed(false);
-                annotations.clear();
-                annotations_rev = annotations_rev.wrapping_add(1);
-                stroke_in_progress = false;
-                input_hook.set_has_strokes(false);
-            }
-        }
-
-        // When not zoomed, keep overlay aligned with whichever display holds the cursor.
-        if !is_zoomed && !active_display.bounds.contains(raw_cursor_global) {
+        let raw_cursor_global = cursor_position();
+        if !active_display.bounds.contains_pixel(raw_cursor_global) {
+            // Finish the old display immediately. Its overlay cannot show a pointer on another display.
+            reset_zoom(
+                &mut camera,
+                &mut magnifier,
+                &mut cursor_sys,
+                &mut annotations,
+                &mut annotations_rev,
+                &mut stroke_in_progress,
+                &mut console,
+                &mut console_hidden_for_zoom,
+            );
             if let Some(disp) = display_under_point(raw_cursor_global) {
                 if disp.handle != active_display.handle {
+                    overlay.hide();
+                    cursor_sys.restore();
                     active_display = disp;
                     overlay.set_bounds(active_display.bounds);
-                    input_hook.set_drag_threshold_px(4.0 * active_display.scale.max(1.0));
+                    motion.jump(raw_cursor_global, now);
                 }
             }
         }
 
-        motion.smooth_time = if settings.smooth_cursor { 0.06 } else { 0.0 };
+        // A zoomed hotspot is an input coordinate; keep its position exact.
+        motion.smooth_time = if settings.smooth_cursor && camera.is_none() {
+            0.06
+        } else {
+            0.0
+        };
         motion.idle_delay = if settings.hide_idle_cursor {
             Some(settings.idle_delay)
         } else {
@@ -748,6 +736,7 @@ fn run_inner() -> Result<(), String> {
         let zoom_frame = if let Some(ref mut cam) = camera {
             let local_cursor = active_display.to_local(raw_cursor_global);
             cam.update(local_cursor, now, dt);
+            cam.keep_cursor_visible(local_cursor);
             if cam.phase() == CameraPhase::Idle {
                 magnifier.hide();
                 camera = None;
@@ -762,8 +751,9 @@ fn run_inner() -> Result<(), String> {
                 Ok((1.0, Point::ZERO))
             } else {
                 let zoom = cam.zoom() as f32 as f64;
+                let viewport = ViewportMath::rect(cam.center(), zoom, active_display.size());
                 magnifier
-                    .render(cam.viewport(), zoom)
+                    .render(viewport, zoom)
                     .map(|origin| (zoom, origin))
             }
         } else {
@@ -775,6 +765,7 @@ fn run_inner() -> Result<(), String> {
                 reset_zoom(
                     &mut camera,
                     &mut magnifier,
+                    &mut cursor_sys,
                     &mut annotations,
                     &mut annotations_rev,
                     &mut stroke_in_progress,
@@ -792,11 +783,7 @@ fn run_inner() -> Result<(), String> {
         let custom_cursor_enabled = settings.enabled
             && settings.cursor_style != CursorStyle::System
             && (settings.custom_cursor_always || is_zoomed_now);
-        cursor_sys.sync(
-            is_zoomed_now,
-            custom_cursor_enabled,
-            settings.cursor_style.replaces_pointing_hand(),
-        );
+        let replace_hand = settings.cursor_style.replaces_pointing_hand();
 
         // 8. Build click marks & cursor draw descriptors.
         let click_dur = settings.click_effect.duration();
@@ -820,37 +807,40 @@ fn run_inner() -> Result<(), String> {
             .collect();
 
         let cursor_zoom_scale = zoom.sqrt();
-        let draw_cursor = match cursor_sys.resolve_cursor() {
-            ActiveCursorKind::None => None,
-            ActiveCursorKind::CustomVector => {
-                let local = active_display.to_local(motion.position());
-                let screen_pt = Point::new(
-                    (local.x - zoom_origin.x) * zoom,
-                    (local.y - zoom_origin.y) * zoom,
-                );
-                Some(CursorDraw {
-                    graphic: CursorGraphic::Vector(settings.cursor_style),
-                    position: screen_pt,
-                    pixel_scale: settings.cursor_size * active_display.scale * cursor_zoom_scale,
-                    bitmap_zoom: cursor_zoom_scale,
-                    opacity: motion.opacity(),
-                })
-            }
-            ActiveCursorKind::SystemBitmap(sys_bmp) => {
-                let local = active_display.to_local(motion.position());
-                let screen_pt = Point::new(
-                    (local.x - zoom_origin.x) * zoom,
-                    (local.y - zoom_origin.y) * zoom,
-                );
-                Some(CursorDraw {
-                    graphic: CursorGraphic::SystemBitmap(sys_bmp),
-                    position: screen_pt,
-                    pixel_scale: active_display.scale * cursor_zoom_scale,
-                    bitmap_zoom: cursor_zoom_scale,
-                    opacity: motion.opacity(),
-                })
-            }
-        };
+        let draw_cursor =
+            match cursor_sys.prepare_cursor(is_zoomed_now, custom_cursor_enabled, replace_hand) {
+                ActiveCursorKind::None => None,
+                ActiveCursorKind::CustomVector => {
+                    let local = active_display.to_local(motion.position());
+                    let screen_pt = Point::new(
+                        (local.x - zoom_origin.x) * zoom,
+                        (local.y - zoom_origin.y) * zoom,
+                    );
+                    Some(CursorDraw {
+                        graphic: CursorGraphic::Vector(settings.cursor_style),
+                        position: screen_pt,
+                        pixel_scale: settings.cursor_size
+                            * active_display.scale
+                            * cursor_zoom_scale,
+                        bitmap_zoom: cursor_zoom_scale,
+                        opacity: motion.opacity(),
+                    })
+                }
+                ActiveCursorKind::SystemBitmap(sys_bmp) => {
+                    let local = active_display.to_local(motion.position());
+                    let screen_pt = Point::new(
+                        (local.x - zoom_origin.x) * zoom,
+                        (local.y - zoom_origin.y) * zoom,
+                    );
+                    Some(CursorDraw {
+                        graphic: CursorGraphic::SystemBitmap(sys_bmp),
+                        position: screen_pt,
+                        pixel_scale: active_display.scale * cursor_zoom_scale,
+                        bitmap_zoom: cursor_zoom_scale,
+                        opacity: motion.opacity(),
+                    })
+                }
+            };
 
         // 9. Render transparent overlay (skips GPU work when frame is static; recovers or restores cursor on GPU reset).
         let frame = OverlayFrame {
@@ -866,12 +856,19 @@ fn run_inner() -> Result<(), String> {
         };
         ensure_overlay_topmost = false;
 
-        if overlay.render(&frame).is_err() {
+        if overlay.render(&frame).is_ok() {
+            if overlay.is_ready() {
+                cursor_sys.sync(is_zoomed_now, custom_cursor_enabled, replace_hand);
+            } else {
+                cursor_sys.restore();
+            }
+        } else {
             overlay.hide();
             cursor_sys.restore();
             reset_zoom(
                 &mut camera,
                 &mut magnifier,
+                &mut cursor_sys,
                 &mut annotations,
                 &mut annotations_rev,
                 &mut stroke_in_progress,
@@ -898,13 +895,16 @@ fn run_inner() -> Result<(), String> {
 }
 
 fn sync_hook_settings(hook: &InputHook, settings: &AppSettings) {
-    hook.set_enabled(settings.enabled);
-    hook.set_trigger(settings.trigger);
     let mut map: HashMap<KeyCombo, HighlightKind> = HashMap::new();
     for (&kind, sc) in &settings.shortcuts {
         map.insert(sc.combo(), kind);
     }
-    hook.set_shortcuts(map, settings.undo_shortcut.as_ref().map(|s| s.combo()));
+    hook.configure(
+        settings.enabled,
+        settings.trigger,
+        map,
+        settings.undo_shortcut.as_ref().map(|s| s.combo()),
+    );
 }
 
 fn create_message_window() -> Result<HWND, String> {

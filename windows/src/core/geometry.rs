@@ -153,6 +153,11 @@ impl Rect {
         p.x >= self.min_x() && p.x <= self.max_x() && p.y >= self.min_y() && p.y <= self.max_y()
     }
 
+    /// Physical Win32 display rectangles exclude their right and bottom edges.
+    pub fn contains_pixel(self, p: Point) -> bool {
+        p.x >= self.min_x() && p.x < self.max_x() && p.y >= self.min_y() && p.y < self.max_y()
+    }
+
     #[inline]
     pub fn union(self, other: Self) -> Self {
         let min_x = self.min_x().min(other.min_x());

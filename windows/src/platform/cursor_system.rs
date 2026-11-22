@@ -91,17 +91,8 @@ impl SystemCursorManager {
         }
     }
 
-    /// Synchronizes cursor hiding state:
-    /// - When `is_zoomed`: hides all standard OS cursors so none appear at unzoomed physical coordinates;
-    ///   replays non-replaced cursors (I-Beam, Resize, System style) as bitmaps in `OverlayWindow`.
-    /// - When not zoomed: selectively hides only `OCR_NORMAL` (+ `OCR_HAND` for `.dot`) if `custom_cursor_enabled`.
-    pub fn sync(
-        &mut self,
-        is_zoomed: bool,
-        custom_cursor_enabled: bool,
-        replace_hand: bool,
-    ) {
-        let desired = if is_zoomed {
+    fn desired_mode(is_zoomed: bool, custom_cursor_enabled: bool, replace_hand: bool) -> HideMode {
+        if is_zoomed {
             HideMode::AllForZoom {
                 replace_arrow: custom_cursor_enabled,
                 replace_hand: custom_cursor_enabled && replace_hand,
@@ -112,8 +103,26 @@ impl SystemCursorManager {
             }
         } else {
             HideMode::None
-        };
+        }
+    }
 
+    /// Resolve the image while the native cursor is still available. Hiding is
+    /// committed only after the overlay has accepted the frame.
+    pub fn prepare_cursor(
+        &mut self,
+        is_zoomed: bool,
+        custom_cursor_enabled: bool,
+        replace_hand: bool,
+    ) -> ActiveCursorKind {
+        let desired = Self::desired_mode(is_zoomed, custom_cursor_enabled, replace_hand);
+        if self.mode != desired {
+            self.restore();
+        }
+        self.resolve_cursor(desired)
+    }
+
+    pub fn sync(&mut self, is_zoomed: bool, custom_cursor_enabled: bool, replace_hand: bool) {
+        let desired = Self::desired_mode(is_zoomed, custom_cursor_enabled, replace_hand);
         if self.mode == desired {
             return;
         }
@@ -166,8 +175,8 @@ impl SystemCursorManager {
     }
 
     /// Resolves what `OverlayWindow` should render for the cursor on this frame.
-    pub fn resolve_cursor(&mut self) -> ActiveCursorKind {
-        if self.mode == HideMode::None {
+    fn resolve_cursor(&mut self, desired: HideMode) -> ActiveCursorKind {
+        if desired == HideMode::None {
             return ActiveCursorKind::None;
         }
 
@@ -185,11 +194,16 @@ impl SystemCursorManager {
         }
         let current = info.hCursor.0 as isize;
 
-        match self.mode {
+        let is_standard = |blank, idc| {
+            Some(current) == blank
+                || (self.mode == HideMode::None
+                    && unsafe { LoadCursorW(None, idc).is_ok_and(|handle| handle == info.hCursor) })
+        };
+        match desired {
             HideMode::None => ActiveCursorKind::None,
-            HideMode::Selective { .. } => {
-                if Some(current) == self.blank_arrow_handle
-                    || Some(current) == self.blank_hand_handle
+            HideMode::Selective { hide_hand } => {
+                if is_standard(self.blank_arrow_handle, IDC_ARROW)
+                    || (hide_hand && is_standard(self.blank_hand_handle, IDC_HAND))
                 {
                     ActiveCursorKind::CustomVector
                 } else {
@@ -200,10 +214,10 @@ impl SystemCursorManager {
                 replace_arrow,
                 replace_hand,
             } => {
-                if replace_arrow && Some(current) == self.blank_arrow_handle {
+                if replace_arrow && is_standard(self.blank_arrow_handle, IDC_ARROW) {
                     return ActiveCursorKind::CustomVector;
                 }
-                if replace_hand && Some(current) == self.blank_hand_handle {
+                if replace_hand && is_standard(self.blank_hand_handle, IDC_HAND) {
                     return ActiveCursorKind::CustomVector;
                 }
                 if let Some(bmp) = self.saved_snapshots.get(&current) {
@@ -223,14 +237,15 @@ impl SystemCursorManager {
                 // Fallback so cursor is never invisible while zoomed.
                 if replace_arrow {
                     ActiveCursorKind::CustomVector
-                } else if let Some(arrow_h) = self.blank_arrow_handle {
-                    self.saved_snapshots
-                        .get(&arrow_h)
-                        .cloned()
+                } else {
+                    self.blank_arrow_handle
+                        .and_then(|handle| self.saved_snapshots.get(&handle).cloned())
+                        .or_else(|| unsafe {
+                            let arrow = LoadCursorW(None, IDC_ARROW).ok()?;
+                            rasterize_hcursor(arrow, arrow.0 as isize)
+                        })
                         .map(ActiveCursorKind::SystemBitmap)
                         .unwrap_or(ActiveCursorKind::None)
-                } else {
-                    ActiveCursorKind::None
                 }
             }
         }

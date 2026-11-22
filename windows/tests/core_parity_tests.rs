@@ -1,6 +1,6 @@
 use livezoom_core::core::annotation::{ArrowHead, HighlightKind, TextLines};
 use livezoom_core::core::camera::{CameraConfig, CameraPhase, ViewportMath, ZoomCamera};
-use livezoom_core::core::cursor::{ClickEffect, CursorMotion, DragPointer};
+use livezoom_core::core::cursor::{ClickEffect, CursorMotion};
 use livezoom_core::core::follow_preset::FollowPreset;
 use livezoom_core::core::geometry::{Point, Rect, Size, Vector};
 use livezoom_core::core::input_fsm::{InputAction, InputFsm, Modifiers};
@@ -262,189 +262,223 @@ fn cursor_motion_and_click_effects_match_macos() {
     }
 }
 
+const DRAW_MODIFIERS: Modifiers = Modifiers {
+    ctrl: true,
+    alt: true,
+    shift: false,
+};
+
 #[test]
-fn drag_pointer_confines_without_reversal_lag() {
-    let bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
-    let mut dp = DragPointer::new(Point::new(90.0, 50.0), Some(bounds));
-    dp.move_to(Point::new(130.0, 50.0), Some(bounds));
-    assert_eq!(dp.location(), Point::new(100.0, 50.0));
-    dp.move_to(Point::new(125.0, 50.0), Some(bounds));
-    assert_eq!(dp.location(), Point::new(95.0, 50.0));
+fn zoom_trigger_keeps_its_release_and_event_position() {
+    let mut fsm = InputFsm::default();
+    let adjacent = Point::new(-1920.0, 200.0);
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    assert!(!fsm.on_trigger_down(TriggerButton::Middle, alt).swallow);
+    assert!(
+        fsm.on_trigger_down(TriggerButton::Middle, Modifiers::NONE)
+            .swallow
+    );
+    let up = fsm.on_trigger_up(TriggerButton::Middle, adjacent);
+    assert!(up.swallow);
+    assert_eq!(up.actions, vec![InputAction::ToggleZoom(adjacent)]);
+    let original_display = Rect::new(0.0, 0.0, 4608.0, 3072.0);
+    let other_display = Rect::new(-1920.0, 0.0, 1920.0, 1080.0);
+    assert!(!original_display.contains_pixel(adjacent));
+    assert!(other_display.contains_pixel(adjacent));
+    assert!(!other_display.contains_pixel(Point::new(0.0, 200.0)));
+
+    assert!(
+        fsm.on_trigger_down(TriggerButton::Middle, Modifiers::NONE)
+            .swallow
+    );
+    assert!(fsm.configure_trigger(true, TriggerButton::Back).is_none());
+    assert!(!fsm.on_wheel(1.0, adjacent).swallow);
+    let old_release = fsm.on_trigger_up(TriggerButton::Middle, adjacent);
+    assert!(old_release.swallow && old_release.actions.is_empty());
+    assert!(
+        fsm.on_trigger_down(TriggerButton::Back, Modifiers::NONE)
+            .swallow
+    );
+    assert_eq!(
+        fsm.on_wheel(1.0, adjacent).actions,
+        vec![InputAction::AdjustZoom {
+            steps: 1.0,
+            at: adjacent
+        }]
+    );
+    assert!(fsm
+        .on_trigger_up(TriggerButton::Back, adjacent)
+        .actions
+        .is_empty());
 }
 
 #[test]
-fn input_fsm_click_vs_drag_and_shortcuts() {
+fn native_clicks_and_drags_pass_through_while_annotations_exist() {
     let mut fsm = InputFsm::default();
-    fsm.drawing_armed = true;
-    fsm.keys_armed = true;
-    fsm.drag_threshold_px = 8.0; // 200% DPI threshold
+    fsm.set_drawing_armed(true);
+    fsm.has_strokes = true;
+    fsm.drawing_bounds = Some(Rect::new(0.0, 0.0, 4608.0, 2976.0));
+    let position = Point::new(3783.0, 2742.0);
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    for mods in [Modifiers::NONE, ctrl] {
+        let down = fsm.on_left_down(position, mods);
+        assert!(!down.swallow);
+        assert_eq!(down.actions, vec![InputAction::Click(position)]);
+        assert!(!fsm.on_mouse_move(Point::new(3800.0, 2752.0), false).swallow);
+        assert!(!fsm.on_left_up().swallow);
+    }
+    // Right-clicking an Explorer tray flyout inside rcWork still passes.
+    assert!(!fsm.observe_click(position).swallow);
+    assert!(
+        !fsm.on_left_down(Point::new(3700.0, 2976.0), DRAW_MODIFIERS)
+            .swallow
+    );
+}
+
+#[test]
+fn cancelled_drawing_keeps_its_release_and_never_freezes_motion() {
+    let mut fsm = InputFsm::default();
+    fsm.set_drawing_armed(true);
+    fsm.drag_threshold_px = 8.0;
+    let start = Point::new(100.0, 100.0);
+    let end = Point::new(112.0, 100.0);
+
+    assert!(fsm.on_left_down(start, DRAW_MODIFIERS).swallow);
+    assert!(fsm
+        .on_mouse_move(Point::new(104.0, 100.0), false)
+        .actions
+        .is_empty());
+    assert!(fsm.set_drawing_armed(false).is_none());
+    assert!(!fsm.on_mouse_move(end, false).swallow);
+    let release = fsm.on_left_up();
+    assert!(release.swallow && release.actions.is_empty());
+    assert!(!fsm.on_left_down(start, Modifiers::NONE).swallow);
+    assert!(!fsm.on_left_up().swallow);
+
+    fsm.set_drawing_armed(true);
+    assert!(fsm.on_left_down(start, DRAW_MODIFIERS).swallow);
+    let stroke = fsm.on_mouse_move(end, true);
+    assert!(!stroke.swallow);
+    assert_eq!(
+        stroke.actions,
+        vec![
+            InputAction::StrokeBegan(start),
+            InputAction::StrokeMoved {
+                point: end,
+                straight: true
+            },
+        ]
+    );
+    assert_eq!(fsm.set_suspended(true), Some(InputAction::StrokeEnded));
+    assert!(fsm.on_left_up().swallow);
+    fsm.set_suspended(false);
+    let hover = fsm.on_mouse_move(end, false);
+    assert!(!hover.swallow && hover.actions.is_empty());
+}
+
+#[test]
+fn suspended_trigger_and_keys_finish_without_claiming_new_input() {
+    let mut fsm = InputFsm::default();
+    fsm.set_keys_armed(true);
+    fsm.has_strokes = true;
+    let position = Point::new(50.0, 50.0);
+
+    assert!(
+        fsm.on_trigger_down(TriggerButton::Middle, Modifiers::NONE)
+            .swallow
+    );
+    assert_eq!(
+        fsm.on_key_down(0x1B, Modifiers::NONE).actions,
+        vec![InputAction::ClearStrokes]
+    );
+    fsm.set_suspended(true);
+    assert!(!fsm.on_wheel(1.0, position).swallow);
+    let release = fsm.on_trigger_up(TriggerButton::Middle, position);
+    assert!(release.swallow && release.actions.is_empty());
+    assert!(!fsm.on_left_down(position, DRAW_MODIFIERS).swallow);
+    fsm.set_suspended(false);
+    assert!(!fsm.on_wheel(1.0, position).swallow);
+    fsm.set_keys_armed(false);
+    let repeat = fsm.on_key_down(0x1B, Modifiers::NONE);
+    assert!(repeat.swallow && repeat.actions.is_empty());
+    assert!(fsm.on_key_up(0x1B).swallow);
+    assert!(!fsm.on_key_down(0x1B, Modifiers::NONE).swallow);
+    fsm.set_keys_armed(true);
+    fsm.has_strokes = false;
+    assert_eq!(
+        fsm.on_key_down(0x1B, Modifiers::NONE).actions,
+        vec![InputAction::CancelZoom]
+    );
+}
+
+#[test]
+fn highlight_and_undo_shortcuts_own_repeats_and_releases() {
+    let mut fsm = InputFsm::default();
+    fsm.set_keys_armed(true);
     fsm.shortcuts
         .insert(KeyCombo::new(0x31, KeyCombo::MOD_ALT), HighlightKind::Box);
     fsm.undo_shortcut = Some(KeyCombo::new(0x5A, KeyCombo::MOD_CTRL));
-
-    // Middle click toggles zoom; Alt+Middle passes through.
-    assert!(
-        !fsm.on_trigger_down(
-            TriggerButton::Middle,
-            Modifiers {
-                alt: true,
-                ..Modifiers::NONE
-            }
-        )
-        .swallow
-    );
-    assert!(fsm.on_trigger_down(TriggerButton::Middle, Modifiers::NONE).swallow);
-    let up = fsm.on_trigger_up(TriggerButton::Middle);
-    assert!(up.swallow);
-    assert_eq!(up.actions, vec![InputAction::ToggleZoom]);
-
-    // Short left click (< 8px at 200% DPI): no Click emitted on down; Click + ReplayLeftClick emitted on up.
-    let down = fsm.on_left_down(Point::new(50.0, 50.0), Modifiers::NONE);
-    assert!(down.swallow);
-    assert!(!down.actions.iter().any(|a| matches!(a, InputAction::Click(_))));
-    let small_mv = fsm.on_mouse_move(Point::new(55.0, 50.0), Modifiers::NONE);
-    assert!(small_mv.swallow); // hover moves swallowed during pending
-    let up = fsm.on_left_up(Point::new(55.0, 50.0));
-    assert!(up.swallow);
-    assert!(up.actions.contains(&InputAction::Click(Point::new(50.0, 50.0))));
-    assert!(up
-        .actions
-        .iter()
-        .any(|a| matches!(a, InputAction::ReplayLeftClick { .. })));
-
-    // Left drag >= 8px starts stroke without emitting Click, swallows WM_MOUSEMOVE, and moves OS cursor to pen tip on up.
-    let down = fsm.on_left_down(Point::new(100.0, 100.0), Modifiers::NONE);
-    assert!(!down.actions.iter().any(|a| matches!(a, InputAction::Click(_))));
-    let mv = fsm.on_mouse_move(
-        Point::new(112.0, 100.0),
-        Modifiers {
-            shift: true,
-            ..Modifiers::NONE
-        },
-    );
-    assert!(mv.swallow);
-    assert!(mv
-        .actions
-        .contains(&InputAction::StrokeBegan(Point::new(100.0, 100.0))));
-    assert!(mv.actions.contains(&InputAction::StrokeMoved {
-        point: Point::new(112.0, 100.0),
-        straight: true
-    }));
-    let end = fsm.on_left_up(Point::new(112.0, 100.0));
-    assert!(end
-        .actions
-        .contains(&InputAction::MoveOsCursor(Point::new(112.0, 100.0))));
-    assert!(end
-        .actions
-        .contains(&InputAction::StrokeEnded(Some(Point::new(112.0, 100.0)))));
-
-    // Ctrl+left-drag strips Ctrl when replaying normal drag.
-    fsm.on_left_down(
-        Point::new(200.0, 200.0),
-        Modifiers {
-            ctrl: true,
-            ..Modifiers::NONE
-        },
-    );
-    let ctrl_mv = fsm.on_mouse_move(
-        Point::new(215.0, 200.0),
-        Modifiers {
-            ctrl: true,
-            ..Modifiers::NONE
-        },
-    );
-    assert!(!ctrl_mv.swallow);
-    assert!(ctrl_mv.actions.contains(&InputAction::ReplayLeftDown {
-        point: Point::new(200.0, 200.0),
-        strip_ctrl: true
-    }));
-    let up = fsm.on_left_up(Point::new(215.0, 200.0));
-    assert!(up.swallow);
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::NONE
+    };
     assert_eq!(
-        up.actions,
-        vec![InputAction::ReplayLeftUp(Point::new(215.0, 200.0))]
+        fsm.on_key_down(0x31, alt).actions,
+        vec![InputAction::Highlight(HighlightKind::Box)]
     );
-
-    // Highlight shortcut works once; holding the key suppresses auto-repeat until key up.
-    let hl = fsm.on_key_down(
-        0x31,
-        Modifiers {
-            alt: true,
-            ..Modifiers::NONE
-        },
-    );
-    assert_eq!(hl.actions, vec![InputAction::Highlight(HighlightKind::Box)]);
-    let repeat_hl = fsm.on_key_down(
-        0x31,
-        Modifiers {
-            alt: true,
-            ..Modifiers::NONE
-        },
-    );
-    assert!(repeat_hl.swallow);
-    assert!(repeat_hl.actions.is_empty());
+    assert!(fsm.on_key_down(0x31, alt).actions.is_empty());
     assert!(fsm.on_key_up(0x31).swallow);
-
-    // Undo shortcut requires has_strokes; holding Ctrl+Z after last stroke is undone keeps swallowing repeats (no leak to IDE).
-    assert!(
-        !fsm.on_key_down(
-            0x5A,
-            Modifiers {
-                ctrl: true,
-                ..Modifiers::NONE
-            }
-        )
-        .swallow
-    );
+    assert!(!fsm.on_key_down(0x5A, ctrl).swallow);
     fsm.has_strokes = true;
-    let undo = fsm.on_key_down(
-        0x5A,
-        Modifiers {
-            ctrl: true,
-            ..Modifiers::NONE
-        },
+    assert_eq!(
+        fsm.on_key_down(0x5A, ctrl).actions,
+        vec![InputAction::UndoStroke]
     );
-    assert!(undo.swallow);
-    assert_eq!(undo.actions, vec![InputAction::UndoStroke]);
     fsm.has_strokes = false;
-    let trailing_undo = fsm.on_key_down(
-        0x5A,
-        Modifiers {
-            ctrl: true,
-            ..Modifiers::NONE
-        },
-    );
-    assert!(trailing_undo.swallow);
-    assert!(trailing_undo.actions.is_empty());
+    let repeat = fsm.on_key_down(0x5A, ctrl);
+    assert!(repeat.swallow && repeat.actions.is_empty());
     assert!(fsm.on_key_up(0x5A).swallow);
 }
 
 #[test]
-fn zoom_escape_and_taskbar_input_remain_available_with_drawing_armed() {
-    let mut fsm = InputFsm::default();
-    fsm.cursor_bounds = Some(Rect::new(0.0, 0.0, 1000.0, 900.0));
-    fsm.set_keys_armed(true);
-    fsm.set_drawing_armed(true);
-    fsm.has_strokes = true;
-
-    let taskbar = Point::new(500.0, 950.0);
-    assert!(!fsm.on_left_down(taskbar, Modifiers::NONE).swallow);
-    assert!(!fsm.on_left_up(taskbar).swallow);
-    assert!(!fsm.on_right_down(taskbar).swallow);
-    assert!(!fsm.on_right_up().swallow);
-
-    let esc = 0x1B;
-    assert_eq!(
-        fsm.on_key_down(esc, Modifiers::NONE).actions,
-        vec![InputAction::ClearStrokes]
-    );
-    fsm.has_strokes = false;
-    assert!(fsm.on_key_down(esc, Modifiers::NONE).actions.is_empty());
-    assert!(fsm.on_key_up(esc).swallow);
-    assert_eq!(
-        fsm.on_key_down(esc, Modifiers::NONE).actions,
-        vec![InputAction::CancelZoom]
-    );
+fn fast_pointer_remains_in_the_submitted_crop_at_fractional_zooms() {
+    let display = Size::new(4608.0, 3072.0);
+    let center = Point::new(2304.0, 1536.0);
+    for level in [1.25, 1.3, 2.0, 2.333, 4.0] {
+        let mut camera = ZoomCamera::new(display, CameraConfig::default());
+        camera.zoom_in(level, center, 0.0);
+        camera.update(center, 0.6, FRAME);
+        camera.set_follow_paused(true);
+        for pointer in [
+            Point::new(4400.0, 2900.0),
+            Point::new(4607.0, 3071.0),
+            Point::ZERO,
+            Point::new(4607.0, 0.0),
+            Point::new(0.0, 3071.0),
+            center,
+        ] {
+            camera.update(pointer, 0.7, FRAME);
+            camera.keep_cursor_visible(pointer);
+            let viewport =
+                ViewportMath::rect(camera.center(), camera.zoom() as f32 as f64, display);
+            let origin = ViewportMath::magnifier_origin(viewport, display);
+            let submitted = Rect::new(origin.x, origin.y, viewport.width, viewport.height);
+            assert!(
+                submitted.contains_pixel(pointer),
+                "{level}x: {pointer:?} outside {submitted:?}"
+            );
+        }
+    }
 }
 
 #[test]

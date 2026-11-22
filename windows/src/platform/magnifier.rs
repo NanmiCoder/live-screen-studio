@@ -13,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
+use crate::core::camera::ViewportMath;
 use crate::core::geometry::{Point, Rect};
 
 /// Full-screen click-through Windows Magnification API host (`WC_MAGNIFIER`).
@@ -131,27 +132,21 @@ impl MagnifierHost {
     }
 
     /// Repositions the magnifier onto a different display when the user zooms on another monitor.
-    pub fn set_display_bounds(&mut self, bounds: Rect) {
+    pub fn set_display_bounds(&mut self, bounds: Rect) -> windows::core::Result<()> {
         if self.display_bounds == bounds {
-            return;
+            return Ok(());
         }
-        self.display_bounds = bounds;
         let x = bounds.x.round() as i32;
         let y = bounds.y.round() as i32;
         let w = bounds.width.round() as i32;
         let h = bounds.height.round() as i32;
         unsafe {
-            let _ = SetWindowPos(
-                self.host_hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                w,
-                h,
-                SWP_NOACTIVATE,
-            );
-            let _ = SetWindowPos(self.mag_hwnd, None, 0, 0, w, h, SWP_NOACTIVATE);
+            SetWindowPos(self.host_hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE)?;
+            SetWindowPos(self.mag_hwnd, None, 0, 0, w, h, SWP_NOACTIVATE)?;
         }
+        self.display_bounds = bounds;
+        self.last_source = None;
+        Ok(())
     }
 
     /// Updates magnification scale and source rectangle (display-local physical pixels).
@@ -162,12 +157,11 @@ impl MagnifierHost {
 
         let disp_x = self.display_bounds.x.round() as i32;
         let disp_y = self.display_bounds.y.round() as i32;
-        let width = self.display_bounds.width as i32;
-        let height = self.display_bounds.height as i32;
-        let src_w = (self.display_bounds.width / z as f64).ceil() as i32;
-        let src_h = (self.display_bounds.height / z as f64).ceil() as i32;
-        let local_x = (viewport_local.x.round() as i32).clamp(0, width - src_w);
-        let local_y = (viewport_local.y.round() as i32).clamp(0, height - src_h);
+        let origin = ViewportMath::magnifier_origin(viewport_local, self.display_bounds.size());
+        let local_x = origin.x as i32;
+        let local_y = origin.y as i32;
+        let src_w = viewport_local.width.ceil() as i32;
+        let src_h = viewport_local.height.ceil() as i32;
 
         let src = RECT {
             left: disp_x + local_x,
@@ -211,7 +205,7 @@ impl MagnifierHost {
             }
         }
 
-        Ok(Point::new(local_x as f64, local_y as f64))
+        Ok(origin)
     }
 
     pub fn hide(&mut self) {
