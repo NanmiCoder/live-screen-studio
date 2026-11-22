@@ -358,7 +358,12 @@ fn input_fsm_click_vs_drag_and_shortcuts() {
         point: Point::new(200.0, 200.0),
         strip_ctrl: true
     }));
-    let _ = fsm.on_left_up(Point::new(215.0, 200.0));
+    let up = fsm.on_left_up(Point::new(215.0, 200.0));
+    assert!(up.swallow);
+    assert_eq!(
+        up.actions,
+        vec![InputAction::ReplayLeftUp(Point::new(215.0, 200.0))]
+    );
 
     // Highlight shortcut works once; holding the key suppresses auto-repeat until key up.
     let hl = fsm.on_key_down(
@@ -412,6 +417,34 @@ fn input_fsm_click_vs_drag_and_shortcuts() {
     assert!(trailing_undo.swallow);
     assert!(trailing_undo.actions.is_empty());
     assert!(fsm.on_key_up(0x5A).swallow);
+}
+
+#[test]
+fn zoom_escape_and_taskbar_input_remain_available_with_drawing_armed() {
+    let mut fsm = InputFsm::default();
+    fsm.cursor_bounds = Some(Rect::new(0.0, 0.0, 1000.0, 900.0));
+    fsm.set_keys_armed(true);
+    fsm.set_drawing_armed(true);
+    fsm.has_strokes = true;
+
+    let taskbar = Point::new(500.0, 950.0);
+    assert!(!fsm.on_left_down(taskbar, Modifiers::NONE).swallow);
+    assert!(!fsm.on_left_up(taskbar).swallow);
+    assert!(!fsm.on_right_down(taskbar).swallow);
+    assert!(!fsm.on_right_up().swallow);
+
+    let esc = 0x1B;
+    assert_eq!(
+        fsm.on_key_down(esc, Modifiers::NONE).actions,
+        vec![InputAction::ClearStrokes]
+    );
+    fsm.has_strokes = false;
+    assert!(fsm.on_key_down(esc, Modifiers::NONE).actions.is_empty());
+    assert!(fsm.on_key_up(esc).swallow);
+    assert_eq!(
+        fsm.on_key_down(esc, Modifiers::NONE).actions,
+        vec![InputAction::CancelZoom]
+    );
 }
 
 #[test]

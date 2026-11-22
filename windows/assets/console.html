@@ -141,6 +141,7 @@
     <button class="nav-btn" data-page="cursor">光标与动效</button>
     <button class="nav-btn" data-page="general">通用与状态</button>
     <div class="spacer"></div>
+    <button class="nav-btn" id="quitApp">退出 LiveZoom</button>
     <div class="power-box">
       <div>
         <div style="font-weight:600">启用放大</div>
@@ -317,6 +318,7 @@
       <div class="card">
         <div class="card-title">常用操作速查</div>
         <div class="row"><span>放大 / 缩回</span><span id="cheatTrigger"><span class="kbd">单击中键</span></span></div>
+        <div class="row"><span>无标注时退出放大</span><span class="kbd">Esc</span></div>
         <div class="row"><span>实时调倍数</span><span id="cheatWheel"><span class="kbd">按住中键</span> + <span class="kbd">滚轮</span></span></div>
         <div class="row"><span>画线 / 画直线</span><span><span class="kbd">左键拖动</span> / <span class="kbd">Shift + 拖动</span></span></div>
         <div class="row"><span>正常拖拽文字</span><span><span class="kbd">Ctrl + 左键拖动</span></span></div>
@@ -382,6 +384,8 @@ function post(msg) {
     window.chrome.webview.postMessage(msg);
   }
 }
+
+document.getElementById('quitApp').addEventListener('click', () => post({ type: 'quit' }));
 
 function updateSettings(patch) {
   if (!state) return;

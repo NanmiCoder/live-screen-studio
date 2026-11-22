@@ -3,23 +3,30 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateMutexW, CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+    TIMER_ALL_ACCESS,
+};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Shell::{NINF_KEY, NIN_SELECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, PeekMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassW, TranslateMessage, MSG, PM_REMOVE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
+    TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_CONTEXTMENU,
     WM_DISPLAYCHANGE, WM_ENDSESSION, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT,
     WM_RBUTTONUP, WNDCLASSW,
 };
 
 use crate::core::annotation::{AnnotationItem, HighlightKind, InkLook};
-use crate::core::camera::{CameraConfig, CameraPhase, ViewportMath, ZoomCamera};
+use crate::core::camera::{CameraConfig, CameraPhase, ZoomCamera};
 use crate::core::cursor::{CursorMotion, CursorStyle};
 use crate::core::geometry::{Point, Rect};
 use crate::core::input_fsm::InputAction;
@@ -27,7 +34,7 @@ use crate::core::settings::{AppSettings, CloseWindowBehavior, KeyCombo};
 use crate::platform::console::{ConsoleEvent, ConsoleWindow};
 use crate::platform::cursor_system::{ActiveCursorKind, SystemCursorManager};
 use crate::platform::display::{cursor_position, display_under_point, DisplayInfo};
-use crate::platform::input_hook::InputHook;
+use crate::platform::input_hook::{InputHook, WM_INPUT_ACTION};
 use crate::platform::magnifier::MagnifierHost;
 use crate::platform::ocr::{capture_ocr_band_sync, is_chinese_ocr_available, recognize_band_async};
 use crate::platform::overlay::{
@@ -39,6 +46,7 @@ use crate::platform::tray::{
 };
 
 const MSG_WINDOW_CLASS: windows::core::PCWSTR = w!("LiveZoomMessageWindow");
+const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
 struct ActiveClick {
     /// Global physical pixel position.
@@ -55,6 +63,57 @@ enum SysMsg {
 
 static SYS_TX: std::sync::OnceLock<std::sync::Mutex<Option<Sender<SysMsg>>>> =
     std::sync::OnceLock::new();
+
+/// Schedules camera ticks without waiting on DWM or holding up the UI message queue.
+struct FrameTimer(Option<HANDLE>);
+
+impl FrameTimer {
+    fn new() -> Self {
+        Self(unsafe {
+            CreateWaitableTimerExW(
+                None,
+                None,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+            .ok()
+        })
+    }
+
+    fn wait_until(&self, deadline: Instant) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        unsafe {
+            if let Some(timer) = self.0 {
+                // A negative due time is relative, in 100 ns units.
+                let due = -(remaining.as_nanos().div_ceil(100).max(1) as i64);
+                if SetWaitableTimer(timer, &due, 0, None, None, false).is_ok() {
+                    MsgWaitForMultipleObjectsEx(
+                        Some(&[timer]),
+                        u32::MAX,
+                        QS_ALLINPUT,
+                        MWMO_INPUTAVAILABLE,
+                    );
+                    return;
+                }
+            }
+            let timeout = remaining.as_micros().div_ceil(1000) as u32;
+            MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+}
+
+impl Drop for FrameTimer {
+    fn drop(&mut self) {
+        if let Some(timer) = self.0 {
+            unsafe {
+                let _ = CloseHandle(timer);
+            }
+        }
+    }
+}
 
 pub fn run() -> Result<(), String> {
     let instance_mutex = unsafe {
@@ -117,7 +176,7 @@ fn run_inner() -> Result<(), String> {
     let mut magnifier = MagnifierHost::new(initial_display.bounds)?;
     let mut overlay = OverlayWindow::new(initial_display.bounds)?;
     let mut cursor_sys = SystemCursorManager::new();
-    let input_hook = InputHook::start()?;
+    let input_hook = InputHook::start(msg_hwnd)?;
 
     let (console_tx, console_rx) = mpsc::channel::<ConsoleEvent>();
     let (ocr_tx, ocr_rx) = mpsc::channel::<(HighlightKind, Option<Rect>)>();
@@ -141,6 +200,8 @@ fn run_inner() -> Result<(), String> {
 
     let start_instant = Instant::now();
     let mut last_frame = start_instant;
+    let mut next_frame = start_instant;
+    let frame_timer = FrameTimer::new();
     let mut active_display = initial_display;
     let mut camera: Option<ZoomCamera> = None;
     let mut last_zoom_origin = Point::ZERO;
@@ -186,9 +247,6 @@ fn run_inner() -> Result<(), String> {
         }
 
         let now = start_instant.elapsed().as_secs_f64();
-        let raw_dt = last_frame.elapsed().as_secs_f64();
-        let dt = raw_dt.clamp(1.0 / 240.0, 1.0 / 20.0);
-        last_frame = Instant::now();
 
         // Helper closure to cleanly exit zoom mode from any trigger (disable toggle, display change, console open).
         let reset_zoom = |camera: &mut Option<ZoomCamera>,
@@ -201,7 +259,6 @@ fn run_inner() -> Result<(), String> {
             if camera.is_some() {
                 *camera = None;
                 magnifier.hide();
-                input_hook.set_cursor_bounds(None);
                 input_hook.set_drawing_armed(false);
                 input_hook.set_keys_armed(false);
                 annotations.clear();
@@ -243,7 +300,16 @@ fn run_inner() -> Result<(), String> {
                     }
                 }
                 SysMsg::ShowMenu => {
-                    // Restore native OS cursor and pause hooks during modal TrackPopupMenu so the cursor never freezes.
+                    reset_zoom(
+                        &mut camera,
+                        &mut magnifier,
+                        &mut annotations,
+                        &mut annotations_rev,
+                        &mut stroke_in_progress,
+                        &mut console,
+                        &mut console_hidden_for_zoom,
+                    );
+                    // Keep the popup and pointer in native screen coordinates.
                     cursor_sys.restore();
                     overlay.hide();
                     input_hook.set_modal_paused(true);
@@ -252,15 +318,6 @@ fn run_inner() -> Result<(), String> {
                     if let Some(cmd) = cmd {
                         match cmd {
                             MENU_OPEN_CONSOLE => {
-                                reset_zoom(
-                                    &mut camera,
-                                    &mut magnifier,
-                                    &mut annotations,
-                                    &mut annotations_rev,
-                                    &mut stroke_in_progress,
-                                    &mut console,
-                                    &mut console_hidden_for_zoom,
-                                );
                                 if let Some(ref mut c) = console {
                                     c.focus();
                                 } else if let Ok(win) = ConsoleWindow::open(
@@ -278,17 +335,6 @@ fn run_inner() -> Result<(), String> {
                                 settings.save();
                                 tray.update_tooltip(settings.enabled, settings.trigger);
                                 sync_hook_settings(&input_hook, &settings);
-                                if !settings.enabled {
-                                    reset_zoom(
-                                        &mut camera,
-                                        &mut magnifier,
-                                        &mut annotations,
-                                        &mut annotations_rev,
-                                        &mut stroke_in_progress,
-                                        &mut console,
-                                        &mut console_hidden_for_zoom,
-                                    );
-                                }
                                 if let Some(ref c) = console {
                                     c.push_settings(&settings);
                                 }
@@ -330,6 +376,12 @@ fn run_inner() -> Result<(), String> {
                 }
                 SysMsg::Quit => running = false,
             }
+            if !running {
+                break;
+            }
+        }
+        if !running {
+            break;
         }
 
         // 3. Process Console UI events.
@@ -396,7 +448,14 @@ fn run_inner() -> Result<(), String> {
                         running = false;
                     }
                 }
+                ConsoleEvent::Quit => running = false,
             }
+            if !running {
+                break;
+            }
+        }
+        if !running {
+            break;
         }
 
         // 4. Process async OCR results.
@@ -426,9 +485,25 @@ fn run_inner() -> Result<(), String> {
         }
 
         // 5. Process input hook actions.
-        for action in input_hook.drain_actions() {
+        let actions = input_hook.drain_actions();
+        let needs_frame = actions.iter().any(|action| {
+            matches!(
+                action,
+                InputAction::ToggleZoom | InputAction::CancelZoom | InputAction::AdjustZoom(_)
+            )
+        });
+        for action in actions {
             match action {
-                InputAction::ToggleZoom => {
+                InputAction::CancelZoom => reset_zoom(
+                    &mut camera,
+                    &mut magnifier,
+                    &mut annotations,
+                    &mut annotations_rev,
+                    &mut stroke_in_progress,
+                    &mut console,
+                    &mut console_hidden_for_zoom,
+                ),
+                InputAction::ToggleZoom if settings.enabled => {
                     let cur_global = drawing_pointer.unwrap_or_else(cursor_position);
                     match camera.as_mut() {
                         None => {
@@ -451,7 +526,7 @@ fn run_inner() -> Result<(), String> {
                                 cam.zoom_in(settings.default_zoom, local, now);
                                 camera = Some(cam);
                                 ensure_overlay_topmost = true;
-                                input_hook.set_cursor_bounds(Some(active_display.work_area));
+                                input_hook.set_drawing_bounds(active_display.work_area);
                                 input_hook.set_drawing_armed(settings.draw_while_zoomed);
                                 input_hook.set_keys_armed(true);
                             }
@@ -461,12 +536,10 @@ fn run_inner() -> Result<(), String> {
                             if cam.phase() == CameraPhase::ZoomingOut {
                                 cam.zoom_in(settings.default_zoom, local, now);
                                 ensure_overlay_topmost = true;
-                                input_hook.set_cursor_bounds(Some(active_display.work_area));
                                 input_hook.set_drawing_armed(settings.draw_while_zoomed);
                                 input_hook.set_keys_armed(true);
                             } else {
                                 cam.zoom_out(local, now);
-                                input_hook.set_cursor_bounds(None);
                                 input_hook.set_drawing_armed(false);
                                 input_hook.set_keys_armed(false);
                                 annotations.clear();
@@ -477,7 +550,7 @@ fn run_inner() -> Result<(), String> {
                         }
                     }
                 }
-                InputAction::AdjustZoom(steps) => {
+                InputAction::AdjustZoom(steps) if settings.enabled => {
                     let factor = (0.1 * steps).exp();
                     if let Some(ref mut cam) = camera {
                         cam.adjust_zoom(factor);
@@ -501,7 +574,7 @@ fn run_inner() -> Result<(), String> {
                             cam.zoom_in(settings.default_zoom, local, now);
                             camera = Some(cam);
                             ensure_overlay_topmost = true;
-                            input_hook.set_cursor_bounds(Some(active_display.work_area));
+                            input_hook.set_drawing_bounds(active_display.work_area);
                             input_hook.set_drawing_armed(settings.draw_while_zoomed);
                             input_hook.set_keys_armed(true);
                         }
@@ -607,29 +680,42 @@ fn run_inner() -> Result<(), String> {
                     }
                 }
                 InputAction::ReplayLeftDown { .. }
+                | InputAction::ReplayLeftUp(_)
                 | InputAction::ReplayLeftClick { .. }
-                | InputAction::MoveOsCursor(_) => {}
+                | InputAction::MoveOsCursor(_)
+                | InputAction::ToggleZoom
+                | InputAction::AdjustZoom(_) => {}
             }
         }
 
         // Skip rendering while console is inside a modal Win32 drag/resize loop.
         if in_modal_ui {
-            std::thread::sleep(Duration::from_millis(16));
+            frame_timer.wait_until(Instant::now() + Duration::from_millis(16));
             continue;
         }
 
         // 6. Update camera & cursor motion.
+        let frame_start = Instant::now();
+        if frame_start < next_frame && !needs_frame {
+            frame_timer.wait_until(next_frame);
+            continue;
+        }
+        let now = frame_start.duration_since(start_instant).as_secs_f64();
+        let dt = frame_start
+            .duration_since(last_frame)
+            .as_secs_f64()
+            .min(0.05);
+        last_frame = frame_start;
         let raw_cursor_global = drawing_pointer.unwrap_or_else(cursor_position);
         let is_zoomed = camera.is_some();
 
-        // If Alt+Tab or system UI released ClipCursor and the cursor left the zoomed monitor, smoothly zoom out.
+        // Leave the pointer free to reach the taskbar and other monitors.
         if let Some(ref mut cam) = camera {
             if !active_display.bounds.contains(raw_cursor_global)
                 && cam.phase() != CameraPhase::ZoomingOut
             {
                 let local = active_display.to_local(raw_cursor_global);
                 cam.zoom_out(local, now);
-                input_hook.set_cursor_bounds(None);
                 input_hook.set_drawing_armed(false);
                 input_hook.set_keys_armed(false);
                 annotations.clear();
@@ -640,7 +726,7 @@ fn run_inner() -> Result<(), String> {
         }
 
         // When not zoomed, keep overlay aligned with whichever display holds the cursor.
-        if !is_zoomed {
+        if !is_zoomed && !active_display.bounds.contains(raw_cursor_global) {
             if let Some(disp) = display_under_point(raw_cursor_global) {
                 if disp.handle != active_display.handle {
                     active_display = disp;
@@ -659,13 +745,12 @@ fn run_inner() -> Result<(), String> {
         motion.update(raw_cursor_global, stroke_in_progress, now, dt);
 
         // Update ZoomCamera & MagnifierHost (exact integer origin returned for pixel-locked overlay).
-        let (zoom, zoom_origin) = if let Some(ref mut cam) = camera {
+        let zoom_frame = if let Some(ref mut cam) = camera {
             let local_cursor = active_display.to_local(raw_cursor_global);
             cam.update(local_cursor, now, dt);
             if cam.phase() == CameraPhase::Idle {
                 magnifier.hide();
                 camera = None;
-                input_hook.set_cursor_bounds(None);
                 input_hook.set_drawing_armed(false);
                 input_hook.set_keys_armed(false);
                 if console_hidden_for_zoom {
@@ -674,18 +759,30 @@ fn run_inner() -> Result<(), String> {
                         c.set_visible(true);
                     }
                 }
-                (1.0, Point::ZERO)
+                Ok((1.0, Point::ZERO))
             } else {
-                let mut vp = cam.viewport();
-                if cam.is_settled() {
-                    vp = ViewportMath::pixel_aligned(vp, cam.zoom(), 1.0, active_display.size());
-                }
-                let snapped_origin = magnifier.render(vp, cam.zoom());
-                (cam.zoom(), snapped_origin)
+                let zoom = cam.zoom() as f32 as f64;
+                magnifier
+                    .render(cam.viewport(), zoom)
+                    .map(|origin| (zoom, origin))
             }
         } else {
-            magnifier.hide();
-            (1.0, Point::ZERO)
+            Ok((1.0, Point::ZERO))
+        };
+        let (zoom, zoom_origin) = match zoom_frame {
+            Ok(frame) => frame,
+            Err(()) => {
+                reset_zoom(
+                    &mut camera,
+                    &mut magnifier,
+                    &mut annotations,
+                    &mut annotations_rev,
+                    &mut stroke_in_progress,
+                    &mut console,
+                    &mut console_hidden_for_zoom,
+                );
+                (1.0, Point::ZERO)
+            }
         };
         last_zoom_origin = zoom_origin;
         last_zoom = zoom;
@@ -769,34 +866,31 @@ fn run_inner() -> Result<(), String> {
         };
         ensure_overlay_topmost = false;
 
-        let drew_frame = match overlay.render(&frame) {
-            Ok(drew) => drew,
-            Err(()) => {
-                // Unrecoverable GPU device loss: immediately give the user back their real OS cursor.
-                cursor_sys.restore();
-                false
-            }
-        };
-
-        // 10. Pace loop: VSync via DwmFlush while actively animating, low-CPU sleep when completely static.
-        let actively_animating = drew_frame
-            || is_zoomed_now
-            || !click_marks.is_empty()
-            || !annotations.is_empty();
-        if actively_animating {
-            unsafe {
-                if DwmFlush().is_err() {
-                    std::thread::sleep(Duration::from_millis(8));
-                }
-            }
-        } else {
-            std::thread::sleep(Duration::from_millis(12));
+        if overlay.render(&frame).is_err() {
+            overlay.hide();
+            cursor_sys.restore();
+            reset_zoom(
+                &mut camera,
+                &mut magnifier,
+                &mut annotations,
+                &mut annotations_rev,
+                &mut stroke_in_progress,
+                &mut console,
+                &mut console_hidden_for_zoom,
+            );
         }
+
+        let refresh_hz = active_display.refresh_hz.clamp(30, 240);
+        next_frame = frame_start + Duration::from_secs_f64(1.0 / refresh_hz as f64);
+        frame_timer.wait_until(next_frame);
     }
 
-    // Clean shutdown: restore system cursor, release ClipCursor, destroy windows.
+    magnifier.hide();
+    overlay.hide();
     cursor_sys.restore();
-    input_hook.set_cursor_bounds(None);
+    input_hook.set_drawing_armed(false);
+    drop(input_hook);
+    drop(tray);
     unsafe {
         let _ = DestroyWindow(msg_hwnd);
     }
@@ -848,13 +942,17 @@ unsafe extern "system" fn msg_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_INPUT_ACTION => LRESULT(0),
         WM_TRAY_ICON => {
             let ev = (lparam.0 & 0xFFFF) as u32;
+            let legacy = (lparam.0 >> 16) == 0;
             if let Some(cell) = SYS_TX.get() {
                 if let Some(ref tx) = *cell.lock().unwrap() {
-                    if ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK {
+                    if matches!(ev, NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONDBLCLK)
+                        || (legacy && ev == WM_LBUTTONUP)
+                    {
                         let _ = tx.send(SysMsg::OpenConsole);
-                    } else if ev == WM_RBUTTONUP {
+                    } else if ev == WM_CONTEXTMENU || (legacy && ev == WM_RBUTTONUP) {
                         let _ = tx.send(SysMsg::ShowMenu);
                     }
                 }

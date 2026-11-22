@@ -10,13 +10,13 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
     SetForegroundWindow, TrackPopupMenu, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WM_APP, WM_NULL,
+    MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_NULL,
 };
 
 use crate::core::settings::TriggerButton;
@@ -39,7 +39,7 @@ impl TrayIcon {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: 1,
-            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: WM_TRAY_ICON,
             ..Default::default()
         };
@@ -58,6 +58,8 @@ impl TrayIcon {
             if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
                 return Err("Shell_NotifyIconW(NIM_ADD) failed".to_string());
             }
+            nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+            let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
         }
         Ok(Self { hwnd, id: 1 })
     }
@@ -67,7 +69,7 @@ impl TrayIcon {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
             uID: self.id,
-            uFlags: NIF_TIP,
+            uFlags: NIF_TIP | NIF_SHOWTIP,
             ..Default::default()
         };
         let trigger_name = match trigger {
@@ -111,7 +113,7 @@ impl TrayIcon {
             let _ = SetForegroundWindow(self.hwnd);
             let cmd = TrackPopupMenu(
                 menu,
-                TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+                TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
                 pt.x,
                 pt.y,
                 0,

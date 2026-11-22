@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, WPARAM,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
@@ -12,12 +14,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1LinearGradientBrush, ID2D1PathGeometry1, ID2D1SolidColorBrush, ID2D1StrokeStyle1,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_CAP_STYLE_FLAT,
-    D2D1_CAP_STYLE_ROUND, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
-    D2D1_DASH_STYLE_CUSTOM, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+    D2D1_COLOR_SPACE_SRGB, D2D1_DASH_STYLE_CUSTOM, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_LINE_JOIN_ROUND, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_QUADRATIC_BEZIER_SEGMENT,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_QUADRATIC_BEZIER_SEGMENT,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
@@ -25,22 +27,24 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
+    IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED,
-    DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT_DO_NOT_WAIT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos, ShowWindow,
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
+    SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOWNOACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::core::annotation::{AnnotationItem, ArrowHead, HighlightKind, InkStyle};
@@ -89,12 +93,27 @@ pub struct OverlayFrame<'a> {
 }
 
 #[derive(PartialEq)]
-struct LastFrameKey {
+struct AnnotationFrameKey {
     zoom_bits: u64,
     origin_x_bits: u64,
     origin_y_bits: u64,
     annotations_rev: u64,
-    cursor_key: Option<(i64, i32, i32, i32, i32)>,
+}
+
+#[derive(PartialEq)]
+struct CursorFrameKey {
+    graphic_id: i64,
+    scale: f64,
+    opacity: u8,
+}
+
+struct CursorSurface {
+    surface: IDCompositionSurface,
+    width: u32,
+    height: u32,
+    image: Option<CursorFrameKey>,
+    offset: Option<Point>,
+    attached: bool,
 }
 
 struct GpuResources {
@@ -105,8 +124,10 @@ struct GpuResources {
     swap_chain: IDXGISwapChain1,
     target_bitmap: Option<ID2D1Bitmap1>,
     dcomp_device: IDCompositionDevice,
-    _dcomp_target: IDCompositionTarget,
-    _dcomp_visual: IDCompositionVisual,
+    dcomp_target: Option<IDCompositionTarget>,
+    annotation_visual: IDCompositionVisual,
+    cursor_visual: IDCompositionVisual,
+    cursor_surface: Option<CursorSurface>,
     round_stroke: ID2D1StrokeStyle1,
     flat_stroke: ID2D1StrokeStyle1,
     sys_cursor_bitmaps: HashMap<isize, ID2D1Bitmap1>,
@@ -121,7 +142,7 @@ pub struct OverlayWindow {
     bounds: Rect,
     visible: bool,
     gpu: GpuResources,
-    last_frame: Option<LastFrameKey>,
+    last_annotations: Option<AnnotationFrameKey>,
 }
 
 impl OverlayWindow {
@@ -144,6 +165,7 @@ impl OverlayWindow {
 
             let hwnd = CreateWindowExW(
                 WS_EX_NOREDIRECTIONBITMAP
+                    | WS_EX_LAYERED
                     | WS_EX_TOPMOST
                     | WS_EX_TRANSPARENT
                     | WS_EX_NOACTIVATE
@@ -162,14 +184,20 @@ impl OverlayWindow {
             )
             .map_err(|e| format!("CreateWindowExW(Overlay) failed: {e}"))?;
 
-            let gpu = create_gpu_resources(hwnd, w_px, h_px)?;
+            // Layered + transparent windows are skipped by cross-process mouse hit testing.
+            let gpu = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
+                .map_err(|e| format!("SetLayeredWindowAttributes(Overlay) failed: {e}"))
+                .and_then(|()| create_gpu_resources(hwnd, w_px, h_px))
+                .inspect_err(|_| {
+                    let _ = DestroyWindow(hwnd);
+                })?;
 
             Ok(Self {
                 hwnd,
                 bounds,
                 visible: false,
                 gpu,
-                last_frame: None,
+                last_annotations: None,
             })
         }
     }
@@ -187,7 +215,7 @@ impl OverlayWindow {
             return;
         }
         self.bounds = bounds;
-        self.last_frame = None;
+        self.last_annotations = None;
         let x = bounds.x.round() as i32;
         let y = bounds.y.round() as i32;
         let w = (bounds.width.round() as u32).max(1);
@@ -203,6 +231,8 @@ impl OverlayWindow {
                 SWP_NOACTIVATE,
             );
             self.gpu.d2d_ctx.SetTarget(None);
+            let _ = self.gpu.annotation_visual.SetContent(None);
+            let _ = self.gpu.dcomp_device.Commit();
             self.gpu.target_bitmap = None;
             let _ = self.gpu.swap_chain.ResizeBuffers(
                 2,
@@ -221,50 +251,18 @@ impl OverlayWindow {
     pub fn recreate_device(&mut self) -> Result<(), String> {
         let w = (self.bounds.width.round() as u32).max(1);
         let h = (self.bounds.height.round() as u32).max(1);
+        // DirectComposition allows a single topmost target per HWND.
+        self.gpu.dcomp_target.take();
         self.gpu = unsafe { create_gpu_resources(self.hwnd, w, h)? };
-        self.last_frame = None;
+        self.last_annotations = None;
         Ok(())
     }
 
-    /// Renders the overlay frame if dirty; returns `Ok(true)` if a frame was drawn, `Ok(false)` if skipped
-    /// because the frame was completely static, or `Err(())` if the GPU device was lost and could not recover.
-    pub fn render(&mut self, frame: &OverlayFrame<'_>) -> Result<bool, ()> {
-        let has_content = !frame.annotations.is_empty()
-            || !frame.click_marks.is_empty()
-            || frame.cursor.as_ref().is_some_and(|c| c.opacity > 0.0);
-
-        if !has_content {
+    pub fn render(&mut self, frame: &OverlayFrame<'_>) -> Result<(), ()> {
+        let cursor = frame.cursor.as_ref().filter(|c| c.opacity > 0.0);
+        if frame.annotations.is_empty() && frame.click_marks.is_empty() && cursor.is_none() {
             self.hide();
-            return Ok(false);
-        }
-
-        let has_active_anim = !frame.click_marks.is_empty()
-            || frame.annotations.iter().any(|a| is_annotation_animating(a, frame.now));
-
-        let cursor_key = frame.cursor.as_ref().map(|c| {
-            let id = match &c.graphic {
-                CursorGraphic::Vector(s) => -((*s as i64) + 1),
-                CursorGraphic::SystemBitmap(b) => b.key as i64,
-            };
-            (
-                id,
-                (c.position.x * 4.0).round() as i32,
-                (c.position.y * 4.0).round() as i32,
-                (c.pixel_scale * 100.0).round() as i32,
-                (c.opacity * 255.0).round() as i32,
-            )
-        });
-
-        let key = LastFrameKey {
-            zoom_bits: frame.zoom.to_bits(),
-            origin_x_bits: frame.zoom_origin.x.to_bits(),
-            origin_y_bits: frame.zoom_origin.y.to_bits(),
-            annotations_rev: frame.annotations_rev,
-            cursor_key,
-        };
-
-        if self.visible && !has_active_anim && !frame.ensure_topmost && self.last_frame.as_ref() == Some(&key) {
-            return Ok(false);
+            return Ok(());
         }
 
         unsafe {
@@ -286,23 +284,71 @@ impl OverlayWindow {
                 );
             }
 
-            let draw_res = self.draw_and_present(frame);
-            if let Err(hr) = draw_res {
-                if hr == D2DERR_RECREATE_TARGET
-                    || hr == DXGI_ERROR_DEVICE_REMOVED
-                    || hr == DXGI_ERROR_DEVICE_RESET
+            match self.render_visuals(frame, cursor) {
+                Ok(()) => Ok(()),
+                Err(hr)
+                    if matches!(
+                        hr,
+                        D2DERR_RECREATE_TARGET
+                            | DXGI_ERROR_DEVICE_REMOVED
+                            | DXGI_ERROR_DEVICE_RESET
+                    ) =>
                 {
-                    if self.recreate_device().is_ok() && self.draw_and_present(frame).is_ok() {
-                        self.last_frame = Some(key);
-                        return Ok(true);
+                    self.recreate_device().map_err(|_| ())?;
+                    self.render_visuals(frame, cursor).map_err(|_| ())
+                }
+                Err(_) => Err(()),
+            }
+        }
+    }
+
+    unsafe fn render_visuals(
+        &mut self,
+        frame: &OverlayFrame<'_>,
+        cursor: Option<&CursorDraw>,
+    ) -> Result<(), windows::core::HRESULT> {
+        let mut commit = self.update_cursor_visual(cursor)?;
+        if frame.annotations.is_empty() && frame.click_marks.is_empty() {
+            if self.last_annotations.take().is_some() {
+                self.gpu
+                    .annotation_visual
+                    .SetContent(None)
+                    .map_err(|e| e.code())?;
+                commit = true;
+            }
+        } else {
+            let key = AnnotationFrameKey {
+                zoom_bits: frame.zoom.to_bits(),
+                origin_x_bits: frame.zoom_origin.x.to_bits(),
+                origin_y_bits: frame.zoom_origin.y.to_bits(),
+                annotations_rev: frame.annotations_rev,
+            };
+            let animating = !frame.click_marks.is_empty()
+                || frame
+                    .annotations
+                    .iter()
+                    .any(|a| is_annotation_animating(a, frame.now));
+            if animating || self.last_annotations.as_ref() != Some(&key) {
+                match self.draw_and_present(frame) {
+                    Ok(()) => {
+                        if self.last_annotations.is_none() {
+                            self.gpu
+                                .annotation_visual
+                                .SetContent(&self.gpu.swap_chain)
+                                .map_err(|e| e.code())?;
+                            commit = true;
+                        }
+                        self.last_annotations = Some(key);
                     }
-                    return Err(());
+                    Err(DXGI_ERROR_WAS_STILL_DRAWING) => {}
+                    Err(hr) => return Err(hr),
                 }
             }
         }
-
-        self.last_frame = Some(key);
-        Ok(true)
+        if commit {
+            self.gpu.dcomp_device.Commit().map_err(|e| e.code())?;
+        }
+        Ok(())
     }
 
     pub fn hide(&mut self) {
@@ -313,10 +359,164 @@ impl OverlayWindow {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.visible = false;
-        self.last_frame = None;
     }
 
-    unsafe fn draw_and_present(&mut self, frame: &OverlayFrame<'_>) -> Result<(), windows::core::HRESULT> {
+    /// The compositor moves the cached cursor image without repainting a monitor-sized texture.
+    unsafe fn update_cursor_visual(
+        &mut self,
+        cursor: Option<&CursorDraw>,
+    ) -> Result<bool, windows::core::HRESULT> {
+        let Some(cursor) = cursor else {
+            if let Some(surface) = self.gpu.cursor_surface.as_mut().filter(|s| s.attached) {
+                self.gpu
+                    .cursor_visual
+                    .SetContent(None)
+                    .map_err(|e| e.code())?;
+                surface.attached = false;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+
+        let (graphic_id, scale, hotspot, width, height) = match &cursor.graphic {
+            CursorGraphic::Vector(style) => {
+                // All vector paths and their shadows fit inside 24 points of the hotspot.
+                let radius = (24.0 * cursor.pixel_scale).ceil() + 1.0;
+                (
+                    -(*style as i64) - 1,
+                    cursor.pixel_scale,
+                    Point::new(radius, radius),
+                    (radius * 2.0) as u32,
+                    (radius * 2.0) as u32,
+                )
+            }
+            CursorGraphic::SystemBitmap(bitmap) => (
+                bitmap.key as i64,
+                cursor.bitmap_zoom,
+                Point::new(
+                    bitmap.hotspot_x as f64 * cursor.bitmap_zoom,
+                    bitmap.hotspot_y as f64 * cursor.bitmap_zoom,
+                ),
+                (bitmap.width as f64 * cursor.bitmap_zoom).ceil() as u32,
+                (bitmap.height as f64 * cursor.bitmap_zoom).ceil() as u32,
+            ),
+        };
+        if self
+            .gpu
+            .cursor_surface
+            .as_ref()
+            .is_none_or(|s| s.width < width || s.height < height)
+        {
+            let width = width.max(32).next_power_of_two();
+            let height = height.max(32).next_power_of_two();
+            let surface = self
+                .gpu
+                .dcomp_device
+                .CreateSurface(
+                    width,
+                    height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )
+                .map_err(|e| e.code())?;
+            self.gpu.cursor_surface = Some(CursorSurface {
+                surface,
+                width,
+                height,
+                image: None,
+                offset: None,
+                attached: false,
+            });
+        }
+
+        let key = CursorFrameKey {
+            graphic_id,
+            scale,
+            opacity: (cursor.opacity * 255.0).round() as u8,
+        };
+        let surface = self.gpu.cursor_surface.as_ref().unwrap();
+        let redraw = surface.image.as_ref() != Some(&key);
+        if redraw {
+            let mut origin = POINT::default();
+            let target = surface.surface.clone();
+            let dxgi_surface: IDXGISurface =
+                target.BeginDraw(None, &mut origin).map_err(|e| e.code())?;
+            let source = CursorDraw {
+                graphic: match &cursor.graphic {
+                    CursorGraphic::Vector(style) => CursorGraphic::Vector(*style),
+                    CursorGraphic::SystemBitmap(bitmap) => {
+                        CursorGraphic::SystemBitmap(bitmap.clone())
+                    }
+                },
+                position: Point::new(origin.x as f64 + hotspot.x, origin.y as f64 + hotspot.y),
+                pixel_scale: cursor.pixel_scale,
+                bitmap_zoom: cursor.bitmap_zoom,
+                opacity: cursor.opacity,
+            };
+            let clip = D2D_RECT_F {
+                left: origin.x as f32,
+                top: origin.y as f32,
+                right: origin.x as f32 + surface.width as f32,
+                bottom: origin.y as f32 + surface.height as f32,
+            };
+            let draw = match create_target_bitmap(&self.gpu.d2d_ctx, &dxgi_surface) {
+                Ok(bitmap) => {
+                    self.gpu.d2d_ctx.SetTarget(&bitmap);
+                    self.gpu.d2d_ctx.BeginDraw();
+                    self.gpu.d2d_ctx.SetTransform(&Matrix3x2::identity());
+                    self.gpu
+                        .d2d_ctx
+                        .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                    self.gpu.d2d_ctx.Clear(None);
+                    self.draw_cursor(&source);
+                    self.gpu.d2d_ctx.PopAxisAlignedClip();
+                    let result = self.gpu.d2d_ctx.EndDraw(None, None);
+                    self.gpu.d2d_ctx.SetTarget(None);
+                    result
+                }
+                Err(error) => Err(error),
+            };
+            drop(dxgi_surface);
+            let end = target.EndDraw();
+            draw.and(end).map_err(|e| e.code())?;
+        }
+
+        let offset = Point::new(cursor.position.x - hotspot.x, cursor.position.y - hotspot.y);
+        let surface = self.gpu.cursor_surface.as_mut().unwrap();
+        let moved = surface.offset != Some(offset);
+        if moved {
+            self.gpu
+                .cursor_visual
+                .SetOffsetX2(offset.x as f32)
+                .map_err(|e| e.code())?;
+            self.gpu
+                .cursor_visual
+                .SetOffsetY2(offset.y as f32)
+                .map_err(|e| e.code())?;
+            surface.offset = Some(offset);
+        }
+        let attaching = !surface.attached;
+        if attaching {
+            self.gpu
+                .cursor_visual
+                .SetContent(&surface.surface)
+                .map_err(|e| e.code())?;
+            surface.attached = true;
+        }
+        surface.image = Some(key);
+        Ok(redraw || moved || attaching)
+    }
+
+    unsafe fn draw_and_present(
+        &mut self,
+        frame: &OverlayFrame<'_>,
+    ) -> Result<(), windows::core::HRESULT> {
+        let bitmap = self
+            .gpu
+            .target_bitmap
+            .as_ref()
+            .ok_or(D2DERR_RECREATE_TARGET)?;
+        self.gpu.d2d_ctx.SetTarget(bitmap);
         self.gpu.d2d_ctx.BeginDraw();
         self.gpu.d2d_ctx.SetTransform(&Matrix3x2::identity());
         self.gpu.d2d_ctx.Clear(Some(&D2D1_COLOR_F {
@@ -352,20 +552,12 @@ impl OverlayWindow {
             self.draw_click_mark(mark, click_scale);
         }
 
-        // 3. Cursor (vector custom cursor OR real Windows system cursor bitmap at zoomed position).
-        if let Some(ref cursor) = frame.cursor {
-            if cursor.opacity > 0.0 {
-                self.draw_cursor(cursor);
-            }
-        }
-
         self.gpu.d2d_ctx.EndDraw(None, None).map_err(|e| e.code())?;
-        let hr = self.gpu.swap_chain.Present(0, DXGI_PRESENT(0));
-        if hr.is_err() {
-            return Err(hr);
-        }
-        self.gpu.dcomp_device.Commit().map_err(|e| e.code())?;
-        Ok(())
+        self.gpu
+            .swap_chain
+            .Present(0, DXGI_PRESENT_DO_NOT_WAIT)
+            .ok()
+            .map_err(|e| e.code())
     }
 
     unsafe fn make_brush(&self, c: ColorRgba) -> Option<ID2D1SolidColorBrush> {
@@ -1057,9 +1249,14 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
     let dcomp_visual = dcomp_device
         .CreateVisual()
         .map_err(|e| format!("CreateVisual failed: {e}"))?;
+    let annotation_visual = dcomp_device.CreateVisual().map_err(|e| e.to_string())?;
+    let cursor_visual = dcomp_device.CreateVisual().map_err(|e| e.to_string())?;
     dcomp_visual
-        .SetContent(&swap_chain)
-        .map_err(|e| format!("SetContent failed: {e}"))?;
+        .AddVisual(&annotation_visual, true, None)
+        .map_err(|e| e.to_string())?;
+    dcomp_visual
+        .AddVisual(&cursor_visual, true, &annotation_visual)
+        .map_err(|e| e.to_string())?;
     dcomp_target
         .SetRoot(&dcomp_visual)
         .map_err(|e| format!("SetRoot failed: {e}"))?;
@@ -1102,8 +1299,10 @@ unsafe fn create_gpu_resources(hwnd: HWND, w_px: u32, h_px: u32) -> Result<GpuRe
         swap_chain,
         target_bitmap: Some(target_bitmap),
         dcomp_device,
-        _dcomp_target: dcomp_target,
-        _dcomp_visual: dcomp_visual,
+        dcomp_target: Some(dcomp_target),
+        annotation_visual,
+        cursor_visual,
+        cursor_surface: None,
         round_stroke,
         flat_stroke,
         sys_cursor_bitmaps: HashMap::new(),
@@ -1122,6 +1321,14 @@ unsafe fn bind_backbuffer(
     let surface: IDXGISurface = swap_chain
         .GetBuffer(0)
         .map_err(|e| format!("SwapChain::GetBuffer failed: {e}"))?;
+    create_target_bitmap(d2d_ctx, &surface)
+        .map_err(|e| format!("CreateBitmapFromDxgiSurface failed: {e}"))
+}
+
+unsafe fn create_target_bitmap(
+    d2d_ctx: &ID2D1DeviceContext,
+    surface: &IDXGISurface,
+) -> windows::core::Result<ID2D1Bitmap1> {
     let props = D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1132,11 +1339,7 @@ unsafe fn bind_backbuffer(
         bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         colorContext: std::mem::ManuallyDrop::new(None),
     };
-    let bitmap = d2d_ctx
-        .CreateBitmapFromDxgiSurface(&surface, Some(&props))
-        .map_err(|e| format!("CreateBitmapFromDxgiSurface failed: {e}"))?;
-    d2d_ctx.SetTarget(&bitmap);
-    Ok(bitmap)
+    d2d_ctx.CreateBitmapFromDxgiSurface(surface, Some(&props))
 }
 
 #[inline]

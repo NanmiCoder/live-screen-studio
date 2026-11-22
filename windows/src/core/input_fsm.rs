@@ -9,6 +9,7 @@ use crate::core::settings::{KeyCombo, TriggerButton};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputAction {
     ToggleZoom,
+    CancelZoom,
     AdjustZoom(f64),
     Click(Point),
     DrawingPointer(Option<Point>),
@@ -19,9 +20,17 @@ pub enum InputAction {
     ClearStrokes,
     Highlight(HighlightKind),
     /// Ask the OS layer to replay a swallowed left-mouse-down (optionally stripping Ctrl first).
-    ReplayLeftDown { point: Point, strip_ctrl: bool },
+    ReplayLeftDown {
+        point: Point,
+        strip_ctrl: bool,
+    },
+    /// Completes a replayed drag in the same input queue as its button-down.
+    ReplayLeftUp(Point),
     /// Ask the OS layer to replay a swallowed left click (down + up).
-    ReplayLeftClick { down_point: Point, up_point: Point },
+    ReplayLeftClick {
+        down_point: Point,
+        up_point: Point,
+    },
     /// Sync the real OS cursor to the pen tip after a swallowed stroke ends.
     MoveOsCursor(Point),
 }
@@ -146,10 +155,11 @@ impl InputFsm {
             DrawGesture::Drawing | DrawGesture::Finishing => {
                 self.draw = DrawGesture::Finishing;
             }
-            DrawGesture::Idle | DrawGesture::Pending { .. } | DrawGesture::Passthrough => {
+            DrawGesture::Idle | DrawGesture::Pending { .. } => {
                 self.draw = DrawGesture::Idle;
                 self.draw_pointer = None;
             }
+            DrawGesture::Passthrough => {}
         }
         match prev {
             DrawGesture::Pending { down_point, ctrl } => {
@@ -221,7 +231,12 @@ impl InputFsm {
     }
 
     pub fn on_left_down(&mut self, point: Point, mods: Modifiers) -> HookOutcome {
-        if !self.enabled || !self.drawing_armed {
+        if !self.enabled
+            || !self.drawing_armed
+            || self
+                .cursor_bounds
+                .is_some_and(|bounds| !bounds.contains(point))
+        {
             return HookOutcome {
                 swallow: false,
                 actions: vec![InputAction::Click(point)],
@@ -302,7 +317,7 @@ impl InputFsm {
             DrawGesture::Passthrough => {
                 self.draw = DrawGesture::Idle;
                 self.draw_pointer = None;
-                HookOutcome::pass()
+                HookOutcome::swallow(vec![InputAction::ReplayLeftUp(point)])
             }
             DrawGesture::Pending { down_point, .. } => {
                 self.draw = DrawGesture::Idle;
@@ -343,7 +358,13 @@ impl InputFsm {
     }
 
     pub fn on_right_down(&mut self, point: Point) -> HookOutcome {
-        if self.enabled && self.drawing_armed && self.has_strokes {
+        if self.enabled
+            && self.drawing_armed
+            && self.has_strokes
+            && self
+                .cursor_bounds
+                .is_none_or(|bounds| bounds.contains(point))
+        {
             self.swallow_right_up = true;
             return HookOutcome::swallow(vec![InputAction::UndoStroke]);
         }
@@ -369,9 +390,13 @@ impl InputFsm {
         if self.held_keys.contains(&vk) {
             return HookOutcome::swallow(Vec::new());
         }
-        if vk == VK_ESCAPE && mods == Modifiers::NONE && self.has_strokes {
+        if vk == VK_ESCAPE && mods == Modifiers::NONE {
             self.held_keys.insert(vk);
-            return HookOutcome::swallow(vec![InputAction::ClearStrokes]);
+            return HookOutcome::swallow(vec![if self.has_strokes {
+                InputAction::ClearStrokes
+            } else {
+                InputAction::CancelZoom
+            }]);
         }
         let combo = KeyCombo::new(vk, mods.to_bits());
         if self.has_strokes && self.undo_shortcut == Some(combo) {
